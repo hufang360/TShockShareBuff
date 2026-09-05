@@ -1,0 +1,98 @@
+using System.Collections.Generic;
+
+namespace ShareBuff
+{
+    /// <summary>
+    /// buff 分类表，数据取自 tr-wiki/buff_categories.md（共 400 条增益/减益/宠物/坐骑/矿车，彼此无交集）。
+    /// 宠物、坐骑、矿车不参与共享；其余按 Gain / Debuff 区分。
+    /// </summary>
+    public static class BuffCats
+    {
+        /// <summary>Gain（105 条）</summary>
+        public static readonly HashSet<int> Gain = new HashSet<int>
+        {
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+            11, 12, 13, 14, 15, 16, 17, 18, 26, 28,
+            29, 34, 43, 48, 58, 59, 60, 62, 63, 71,
+            73, 74, 75, 76, 77, 78, 79, 87, 89, 93,
+            95, 96, 97, 98, 99, 100, 104, 105, 106, 107,
+            108, 109, 110, 111, 112, 113, 114, 115, 116, 117,
+            121, 122, 123, 124, 146, 147, 150, 151, 157, 158,
+            159, 161, 165, 170, 171, 172, 173, 174, 175, 176,
+            177, 178, 179, 180, 181, 192, 198, 205, 206, 207,
+            215, 257, 306, 308, 311, 312, 314, 336, 340, 343,
+            348, 366, 376, 383, 396,
+        };
+
+        /// <summary>Debuff（87 条）</summary>
+        public static readonly HashSet<int> Debuff = new HashSet<int>
+        {
+            20, 21, 22, 23, 24, 25, 30, 31, 32, 33,
+            35, 36, 37, 38, 39, 44, 46, 47, 67, 68,
+            69, 70, 72, 80, 86, 88, 94, 103, 119, 120,
+            137, 144, 145, 148, 149, 153, 156, 160, 163, 164,
+            169, 183, 186, 189, 194, 195, 196, 197, 199, 203,
+            204, 307, 309, 310, 313, 315, 316, 319, 320, 321,
+            323, 324, 326, 332, 333, 334, 337, 344, 350, 353,
+            357, 358, 359, 360, 361, 362, 363, 364, 367, 368,
+            369, 375, 395, 397, 398, 399, 400,
+        };
+
+        /// <summary>Pet（120 条）</summary>
+        public static readonly HashSet<int> Pet = new HashSet<int>
+        {
+            19, 27, 40, 41, 42, 45, 49, 50, 51, 52,
+            53, 54, 55, 56, 57, 61, 64, 65, 66, 81,
+            82, 83, 84, 85, 90, 91, 92, 101, 102, 125,
+            126, 127, 133, 134, 135, 136, 139, 140, 152, 154,
+            155, 182, 187, 188, 190, 191, 200, 201, 202, 213,
+            214, 216, 217, 218, 219, 230, 258, 259, 260, 261,
+            262, 263, 264, 265, 266, 267, 268, 271, 274, 284,
+            285, 286, 287, 288, 289, 290, 291, 292, 293, 294,
+            295, 296, 297, 298, 299, 300, 301, 302, 303, 304,
+            317, 322, 325, 327, 328, 329, 330, 331, 335, 341,
+            345, 349, 351, 352, 354, 355, 356, 365, 371, 372,
+            373, 382, 385, 386, 387, 388, 389, 390, 393, 394,
+        };
+
+        /// <summary>Mount（34 条）</summary>
+        public static readonly HashSet<int> Mount = new HashSet<int>
+        {
+            128, 129, 130, 131, 132, 141, 142, 143, 162, 168,
+            193, 212, 275, 276, 277, 278, 279, 280, 281, 282,
+            283, 305, 318, 342, 370, 374, 377, 378, 379, 380,
+            381, 384, 391, 392,
+        };
+
+        /// <summary>Minecart（54 条）</summary>
+        public static readonly HashSet<int> Minecart = new HashSet<int>
+        {
+            118, 138, 166, 167, 184, 185, 208, 209, 210, 211,
+            220, 221, 222, 223, 224, 225, 226, 227, 228, 229,
+            231, 232, 233, 234, 235, 236, 237, 238, 239, 240,
+            241, 242, 243, 244, 245, 246, 247, 248, 249, 250,
+            251, 252, 253, 254, 255, 256, 269, 270, 272, 273,
+            338, 339, 346, 347,
+        };
+
+        /// <summary>永不共享：宠物 + 坐骑 + 矿车</summary>
+        public static readonly HashSet<int> Excluded = new HashSet<int>();
+
+        static BuffCats()
+        {
+            foreach (int id in Pet) Excluded.Add(id);
+            foreach (int id in Mount) Excluded.Add(id);
+            foreach (int id in Minecart) Excluded.Add(id);
+        }
+
+        /// <summary>是否可共享（不含 blacklist 判断，那是配置层面的事）</summary>
+        public static bool IsSharable(int buffId, bool shareDebuff)
+        {
+            if (buffId <= 0 || Excluded.Contains(buffId))
+                return false;
+            if (Gain.Contains(buffId))
+                return true;
+            return shareDebuff && Debuff.Contains(buffId);
+        }
+    }
+}

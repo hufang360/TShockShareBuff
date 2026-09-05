@@ -16,7 +16,7 @@ namespace ShareBuff
     {
         #region Plugin Info
         public override string Author => "hufang360";
-        public override string Description => "buff全服共享";
+        public override string Description => "Buff全服共享";
         public override string Name => "ShareBuff";
         public override Version Version => Assembly.GetExecutingAssembly().GetName().Version;
         #endregion
@@ -47,7 +47,7 @@ namespace ShareBuff
         {
             Directory.CreateDirectory(SaveDir);
             Reload();
-            BuffClock.Build();
+            // BuffClock 的时长表要等游戏内容就绪，由首次取值时懒加载
 
             ServerApi.Hooks.GameUpdate.Register(this, OnGameUpdate);
             ServerApi.Hooks.ServerLeave.Register(this, OnServerLeave);
@@ -247,6 +247,7 @@ namespace ShareBuff
         void Reload()
         {
             _config = Config.Load(Path.Combine(SaveDir, "config.json"));
+            BuffClock.Reset();
         }
 
         #endregion
@@ -370,17 +371,17 @@ namespace ShareBuff
             return true;
         }
 
+        /// <summary>
+        /// 是否参与共享：blacklist 优先，其余按 BuffCats 分类表判断。宠物 / 坐骑 / 矿车永不共享。
+        /// 注意：增益表里含 28/29/93/366 等"时间不递减"的 buff，它们照常共享，只是服务器不递减计时。
+        /// </summary>
         bool CanShare(int buffId)
         {
             if (buffId <= 0 || buffId >= BuffID.Count)
                 return false;
             if (_config.blacklist.Contains(buffId))
                 return false;
-            if (!_config.shareDebuff && Main.debuff[buffId])
-                return false;
-            if (BuffClock.NoDecrease(buffId))
-                return false;
-            return true;
+            return BuffCats.IsSharable(buffId, _config.shareDebuff);
         }
 
         #endregion

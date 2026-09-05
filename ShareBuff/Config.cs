@@ -30,12 +30,13 @@ namespace ShareBuff
         /// <summary>指定 buff 时长（秒），优先级高于 Item.buffTime</summary>
         public List<BuffData> buffs = new List<BuffData>();
 
-        /// <summary>永不共享的 buff id</summary>
+        /// <summary>永不共享的 buff id（宠物 / 坐骑 / 矿车已由 BuffCats 硬性排除，无需在此列出）</summary>
         public List<int> blacklist = new List<int>();
 
         /// <summary>不参与共享的玩家名</summary>
         public List<string> exclude = new List<string>();
 
+        [JsonIgnore]
         public bool IsMirror => string.Equals(mode, "mirror", System.StringComparison.OrdinalIgnoreCase);
 
         public static Config Load(string path)
