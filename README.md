@@ -68,6 +68,7 @@
   "defaultSeconds": 3600,
   "cooldownSeconds": 5,
   "shareDebuff": false,
+  "detectPotionUse": true,
   "buffs": [ { "id": 3, "seconds": 3600 } ],
   "blacklist": [],
   "exclude": []
@@ -77,7 +78,19 @@
 - `mode`：`trigger` | `mirror`
 - `takeOverSource`：`true` 时连触发者本人的 buff 时长也统一到服务器值（保证全服完全一致）；`false` 时不动触发者
 - `shareDebuff`：`true` 时减益也全服共享（默认 `false`，即按 `Main.debuff` 排除）
+- `detectPotionUse`：检测背包药水消耗以感知"重复喝药"，关闭后退化为靠计时归零自动重开一轮
 - `blacklist`：无论 `shareDebuff` 如何，这些 id 永不共享
+- `buffs[].seconds` 与 `defaultSeconds` 单位是**秒**；`Item.buffTime` 建表拿到的是 tick，无需配置
+
+## 5. 命令
+
+| 命令 | 权限 | 说明 |
+|------|------|------|
+| `/sharebuff on` / `off` | `sharebuff.admin` | 运行时开关（不写回配置文件） |
+| `/sharebuff reload` | `sharebuff.admin` | 重载 `config.json` |
+| `/sharebuff list` | `sharebuff.admin` | 列出每个玩家当前在管的 buff 及服务器计时的剩余秒数，用于核对计时是否准确 |
+
+别名：`/sb`
 
 ## 5. 实现结构
 
@@ -91,7 +104,8 @@ ShareBuff/
 ## 6. 风险与对策
 
 - **时长取值的误差场景**：`Item.buffTime` 建表拿到的是"名义时长"。重叠喝药、专家/大师难度对 debuff 的时长加成、饱食类三档 buff 会与服务器值不符；`takeOverSource=true` 时以服务器值为准，这本身就是"全服共享"想要的一致性。
-- **重复喝药刷新时长**：客户端会刷新，但服务器只看得到 type 已存在，检测不到"刷新"。可选择忽略（按服务器计时走），或调低 `cooldownSeconds` 后允许再次接管。
+- **重复喝药（已处理）**：客户端刷新时长不会改变 buffType 列表，50 包不发、服务器无感。改由 `GetDataHandlers.PlayerSlot` 监控背包——某槽位原有物品恰好少 1 个且该物品 `buffType > 0`，即判定为喝药，用该物品自身的 `buffTime` 重置该玩家计时（`trigger` 只同步自己，`mirror` 全服一起刷新）。误判（如扔掉一瓶）的代价只是一次计时重置。
+- **兜底**：即便漏检，计时归零时若客户端仍持有该 buff（`buffType` 里还在），会自动重开一轮，不会提前误清。
 - **包量放大**：O(在线人数 × 新增 buff 数)，靠 `cooldownSeconds` 节流。
 - **buff 槽位**：目标玩家 buff 满 44 时，`AddBuff` 会挤掉最前面的非 debuff（Player.cs:5317-5351）。
 - **宠物/坐骑类 buff 互斥**：`AddBuff` 内部会移除同类旧 buff，属于原版行为，不额外处理。
