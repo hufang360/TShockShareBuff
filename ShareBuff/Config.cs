@@ -88,7 +88,7 @@ namespace ShareBuff
         public int id = 0;
 
         /// <summary>持续时长（秒）</summary>
-        public int seconds = 3600;
+        public int seconds = 60;
     }
 
     /// <summary>
