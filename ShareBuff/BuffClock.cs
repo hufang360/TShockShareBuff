@@ -55,7 +55,7 @@ namespace ShareBuff
             }
             catch (Exception ex)
             {
-                // 建表失败不影响主流程，退化为配置表 + defaultSeconds；熔断避免每次取值都重试刷日志
+                // 建表失败不影响主流程，退化为配置指定值 + 分类兜底值；熔断避免每次取值都重试刷日志
                 _failed = true;
                 TShockAPI.TShock.Log.Error($"[ShareBuff] 建立 buff 时长表失败，将退化为配置值：{ex.Message}");
             }
@@ -70,21 +70,21 @@ namespace ShareBuff
             _itemBuff.Clear();
         }
 
-        /// <summary>取 buff 的名义时长（tick）：配置表 > Item.buffTime > defaultSeconds</summary>
-        public static int GetDuration(int buffId, Config cfg)
+        /// <summary>
+        /// 时长优先级：配置指定的秒数 > 药水时长（Item.buffTime 建表）> 分类兜底秒数。
+        /// 药水时长最贴近玩家实际体验，所以兜底之前优先用它。
+        /// </summary>
+        public static int GetDuration(int buffId, int cfgSeconds, int fallbackSeconds)
         {
             Build();
 
-            foreach (BuffData d in cfg.buffs)
-            {
-                if (d.id == buffId)
-                    return SecondsToTicks(d.seconds);
-            }
+            if (cfgSeconds > 0)
+                return SecondsToTicks(cfgSeconds);
 
             if (_buffTime.TryGetValue(buffId, out int ticks) && ticks > 0)
                 return ticks;
 
-            return SecondsToTicks(cfg.defaultSeconds);
+            return SecondsToTicks(fallbackSeconds);
         }
 
         /// <summary>物品自身携带的 buff 与时长，用于“重复喝药”时精确刷新</summary>

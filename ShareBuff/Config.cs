@@ -1,6 +1,10 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Text;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace ShareBuff
 {
@@ -15,22 +19,37 @@ namespace ShareBuff
         /// <summary>是否连触发者本人的 buff 时长也统一到服务器值</summary>
         public bool takeOverSource = true;
 
-        /// <summary>时长兜底值（秒）</summary>
-        public int defaultSeconds = 3600;
+        /// <summary>增益的兜底时长（秒）：药水时长查不到、buffs 表也没指定时用它</summary>
+        public int gainDefaultSeconds = 300;
+
+        /// <summary>减益的兜底时长（秒）</summary>
+        public int debuffDefaultSeconds = 30;
 
         /// <summary>同一 buff 的最小广播间隔（秒），用于防回环</summary>
         public int cooldownSeconds = 5;
 
-        /// <summary>是否共享减益（Main.debuff）</summary>
+        /// <summary>是否共享减益。开启后 debuff 白名单里的 id 也参与共享</summary>
         public bool shareDebuff = false;
 
         /// <summary>检测背包药水消耗，用于处理“重复喝药客户端刷新时长”</summary>
         public bool detectPotionUse = true;
 
-        /// <summary>指定 buff 时长（秒），优先级高于 Item.buffTime</summary>
+        /// <summary>
+        /// 逐条指定 buff 时长（秒），优先级最高，高于药水时长。
+        /// 想给某个 buff 固定时长就在这里加一条：{ "id": 5, "seconds": 600 }
+        /// </summary>
         public List<BuffData> buffs = new List<BuffData>();
 
-        /// <summary>永不共享的 buff id（宠物 / 坐骑 / 矿车已由 BuffCats 硬性排除，无需在此列出）</summary>
+        /// <summary>增益白名单：只有这里列出的 id 才会共享（默认 105 条）</summary>
+        [JsonConverter(typeof(IntListCompactConverter))]
+        public List<int> gain = new List<int>();
+
+        /// <summary>减益白名单：shareDebuff 为 true 时才生效（默认 87 条）</summary>
+        [JsonConverter(typeof(IntListCompactConverter))]
+        public List<int> debuff = new List<int>();
+
+        /// <summary>额外的永不共享 id。宠物 / 坐骑 / 矿车已由 BuffCats 硬排除，无需在此列出</summary>
+        [JsonConverter(typeof(IntListCompactConverter))]
         public List<int> blacklist = new List<int>();
 
         /// <summary>不参与共享的玩家名</summary>
@@ -44,7 +63,10 @@ namespace ShareBuff
             if (File.Exists(path))
                 return JsonConvert.DeserializeObject<Config>(File.ReadAllText(path)) ?? new Config();
 
+            // 首次生成：把 wiki 分类表的 Gain / Debuff 填进去作为白名单初值
             var c = new Config();
+            c.gain = BuffCats.Gain.OrderBy(x => x).ToList();
+            c.debuff = BuffCats.Debuff.OrderBy(x => x).ToList();
             File.WriteAllText(path, JsonConvert.SerializeObject(c, Formatting.Indented));
             return c;
         }
@@ -57,5 +79,48 @@ namespace ShareBuff
 
         /// <summary>持续时长（秒）</summary>
         public int seconds = 3600;
+    }
+
+    /// <summary>
+    /// 把 List&lt;int&gt; 写成一行，避免几百个 id 每人一行把配置文件撑爆。
+    /// </summary>
+    public class IntListCompactConverter : JsonConverter
+    {
+        public override bool CanConvert(Type objectType) => objectType == typeof(List<int>);
+
+        public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
+        {
+            var list = value as List<int>;
+            if (list == null || list.Count == 0)
+            {
+                writer.WriteRawValue("[]");
+                return;
+            }
+
+            var sb = new StringBuilder("[");
+            for (int i = 0; i < list.Count; i++)
+            {
+                if (i > 0)
+                    sb.Append(", ");
+                sb.Append(list[i]);
+            }
+            sb.Append(']');
+            writer.WriteRawValue(sb.ToString());
+        }
+
+        public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
+        {
+            if (reader.TokenType == JsonToken.Null)
+                return new List<int>();
+
+            JArray arr = JArray.Load(reader);
+            var list = new List<int>();
+            foreach (JToken t in arr)
+            {
+                if (int.TryParse(t.ToString(), out int v))
+                    list.Add(v);
+            }
+            return list;
+        }
     }
 }

@@ -46,8 +46,8 @@
 | FR1 | 检测新增 buff | `GameUpdate` 每 tick 遍历在线玩家 `TPlayer.buffType`，与快照 diff 取新增项（开销极小，无需轮询间隔） |
 | FR2 | 接管 + 广播 | 对新增且允许共享的 buff：先给**触发者本人**补发 `55 + T`（把时长揽到服务器手里），再给其他在线玩家下发 `55 + T` |
 | FR3 | 防回环 | 全局 buff 冷却表：同一 buffId 在 `cooldownSeconds` 内只广播一次 |
-| FR4 | 过滤 | 按 `BuffCats` 分类表过滤：增益默认共享，减益由 `shareDebuff` 控制，**宠物 / 坐骑 / 矿车永不共享**（代码层硬排除，服主清空 blacklist 也不会失效）；另有 blacklist、未登录/SSC 未就绪玩家、exclude 名单玩家 |
-| FR5 | 时长与计时 | 时长按 配置表 → `Item.buffTime` 建表 → `defaultSeconds` 优先级取值；服务器维护 `remainTicks` 倒计时表，每 tick 递减，跳过 `TimeLeftDoesNotDecrease` |
+| FR4 | 过滤 | **白名单制**：只有配置 `gain` 里的 id 才共享，`shareDebuff=true` 时 `debuff` 里的也共享。两道额外闸门：`blacklist`，以及宠物 / 坐骑 / 矿车的硬排除（代码层，服主清不掉） |
+| FR5 | 时长与计时 | 优先级：`buffs` 表指定 > 药水时长（`Item.buffTime`）> 分类兜底（增益 5 分钟 / 减益 30 秒）；服务器维护 `remainTicks` 倒计时表，每 tick 递减，跳过 `TimeLeftDoesNotDecrease` |
 | FR6 | 快照重置 | `ServerJoin` 时预填该玩家快照（避免进服自带 buff 触发全服）；`ServerLeave` / 死亡重生时清空该玩家受管项 |
 | FR7 | 热重载 | `GeneralHooks.ReloadEvent` + `/sharebuff reload` |
 | FR8 | 开关 | `/sharebuff on|off|reload`，权限 `sharebuff.admin` |
@@ -58,19 +58,21 @@
 - **`trigger` 触发式**：某人获得 buff 的那一刻，全服其他人各自获得一段配置时长，之后各自独立倒计时、互不影响。靠 `cooldownSeconds` 防回环。
 - **`mirror` 镜像式**：全服 buff 列表始终对齐到并集——只要还有一人持有某 buff，全服缺失的人会被持续补发；所有人都失效后才撤销（撤销靠发 `55 + time=1`，有 1~2 秒延迟）。此模式下 `cooldownSeconds` 退化为补发节流间隔。
 
-## 3.1 buff 分类（`BuffCats.cs`）
+## 3.1 buff 分类与白名单
 
-数据来源：`tr-wiki/buff_categories.md` 第六节的 C# 数组定义，共 400 条、彼此无交集。
+分类数据来源：`tr-wiki/buff_categories.md` 第六节的 C# 数组定义，共 400 条、彼此无交集。首次启动时会把 Gain / Debuff 写进配置文件作为**白名单初值**，之后由服主自由增删。
 
-| 类别 | 条数 | 是否共享 |
+| 类别 | 条数 | 落到配置 |
 |------|------|----------|
-| 增益 Gain | 105 | ✅ 默认共享 |
-| 减益 Debuff | 87 | 由 `shareDebuff` 控制（默认否） |
-| 宠物 Pet | 120 | ❌ 永不共享 |
-| 坐骑 Mount | 34 | ❌ 永不共享 |
-| 矿车 Minecart | 54 | ❌ 永不共享 |
+| 增益 Gain | 105 | → `gain`（白名单，默认生效） |
+| 减益 Debuff | 87 | → `debuff`（`shareDebuff=true` 时才生效） |
+| 宠物 Pet | 120 | 硬排除，不进配置 |
+| 坐骑 Mount | 34 | 硬排除，不进配置 |
+| 矿车 Minecart | 54 | 硬排除，不进配置 |
 
-不在任何表里的 id（如未来版本新增）一律不共享，宁可漏也不要错共享宠物/坐骑。
+判断顺序：`blacklist` → 宠物/坐骑/矿车硬排除 → `gain` → (`shareDebuff` ? `debuff` : 不共享)。不在白名单里的一律不共享。
+
+宠物 / 坐骑 / 矿车是代码层硬排除（`BuffCats.Excluded`），即使被误加进 `gain` 也不会共享。
 
 **注意**：增益表里含 28（狼人）、29（灵视）、93（弹药箱）、366 等 `TimeLeftDoesNotDecrease` 的 buff——它们照常共享，只是服务器不递减其计时（永久生效）。所以"是否共享"与"是否递减"是两件事。
 
@@ -81,11 +83,14 @@
   "enabled": true,
   "mode": "trigger",
   "takeOverSource": true,
-  "defaultSeconds": 3600,
+  "gainDefaultSeconds": 300,
+  "debuffDefaultSeconds": 30,
   "cooldownSeconds": 5,
   "shareDebuff": false,
   "detectPotionUse": true,
-  "buffs": [ { "id": 3, "seconds": 3600 } ],
+  "buffs": [ { "id": 5, "seconds": 600 } ],
+  "gain": [1, 2, 3, ... ],
+  "debuff": [20, 21, 22, ... ],
   "blacklist": [],
   "exclude": []
 }
@@ -96,7 +101,16 @@
 - `shareDebuff`：`true` 时减益也全服共享（默认 `false`）
 - `detectPotionUse`：检测背包药水消耗以感知"重复喝药"，关闭后退化为靠计时归零自动重开一轮
 - `blacklist`：额外的永不共享 id。宠物 / 坐骑 / 矿车已由 `BuffCats` 硬排除，无需在此列出
-- `buffs[].seconds` 与 `defaultSeconds` 单位是**秒**；`Item.buffTime` 建表拿到的是 tick，无需配置
+- `gain` / `debuff`：白名单，只有列在里面的 id 才共享
+
+### 时长取值优先级
+
+1. **`buffs` 表里指定的 `seconds`** —— 想给某个 buff 固定时长就加一条，优先级最高
+2. **药水时长（`Item.buffTime`）** —— 自动建表，最贴近玩家实际喝药体验，所以优先于兜底值
+3. **分类兜底** —— 增益用 `gainDefaultSeconds`（默认 300 秒 / 5 分钟），减益用 `debuffDefaultSeconds`（默认 30 秒）
+
+三个值单位都是**秒**；`Item.buffTime` 建表拿到的是 tick（1/60 秒），内部自动换算，无需配置。
+改完配置执行 `/sharebuff reload` 生效。
 
 ## 5. 命令
 

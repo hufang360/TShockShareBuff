@@ -85,14 +85,5 @@ namespace ShareBuff
             foreach (int id in Minecart) Excluded.Add(id);
         }
 
-        /// <summary>是否可共享（不含 blacklist 判断，那是配置层面的事）</summary>
-        public static bool IsSharable(int buffId, bool shareDebuff)
-        {
-            if (buffId <= 0 || Excluded.Contains(buffId))
-                return false;
-            if (Gain.Contains(buffId))
-                return true;
-            return shareDebuff && Debuff.Contains(buffId);
-        }
     }
 }

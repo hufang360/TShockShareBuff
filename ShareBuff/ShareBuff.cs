@@ -24,6 +24,10 @@ namespace ShareBuff
         static readonly string SaveDir = Path.Combine(TShock.SavePath, "ShareBuff");
         static Config _config;
 
+        // 白名单（来自配置，Reload 时重建，避免 List.Contains 的线性查找）
+        static HashSet<int> _gainSet = new HashSet<int>();
+        static HashSet<int> _debuffSet = new HashSet<int>();
+
         // 玩家 index -> buff id -> 剩余 tick（服务器自计时）
         readonly Dictionary<int, Dictionary<int, int>> _timers = new Dictionary<int, Dictionary<int, int>>();
 
@@ -91,7 +95,7 @@ namespace ShareBuff
                     if (IsValid(plrObj) && CurrentBuffs(plrObj).Contains(buffId))
                     {
                         // 客户端还挂着：说明服务器估短了，或玩家重复喝药刷新过。重开一轮。
-                        kv.Value[buffId] = BuffClock.GetDuration(buffId, _config);
+                        kv.Value[buffId] = DurationOf(buffId);
                     }
                     else
                     {
@@ -166,7 +170,7 @@ namespace ShareBuff
                     if (cur.Contains(buffId))
                         continue;
 
-                    int ticks = BuffClock.GetDuration(buffId, _config);
+                    int ticks = DurationOf(buffId);
                     SetTimer(plr.Index, buffId, ticks);
                     plr.SetBuff(buffId, ticks, true);
                 }
@@ -188,7 +192,7 @@ namespace ShareBuff
                 return;
             _cooldown[buffId] = _tick;
 
-            int ticks = BuffClock.GetDuration(buffId, _config);
+            int ticks = DurationOf(buffId);
             Apply(src, buffId, ticks, _config.takeOverSource);
         }
 
@@ -221,7 +225,7 @@ namespace ShareBuff
             if (buffType <= 0 || !CanShare(buffType))
                 return;
 
-            int ticks = buffTime > 0 ? buffTime : BuffClock.GetDuration(buffType, _config);
+            int ticks = buffTime > 0 ? buffTime : DurationOf(buffType);
 
             // 客户端已自行刷新，服务器只需同步自己的计时
             SetTimer(e.Player.Index, buffType, ticks);
@@ -247,6 +251,8 @@ namespace ShareBuff
         void Reload()
         {
             _config = Config.Load(Path.Combine(SaveDir, "config.json"));
+            _gainSet = new HashSet<int>(_config.gain);
+            _debuffSet = new HashSet<int>(_config.debuff);
             BuffClock.Reset();
         }
 
@@ -325,6 +331,28 @@ namespace ShareBuff
             }
         }
 
+        /// <summary>
+        /// 取 buff 时长（tick）：buffs 表指定 > 药水时长 > 分类兜底（增益 gainDefaultSeconds / 减益 debuffDefaultSeconds）
+        /// </summary>
+        int DurationOf(int buffId)
+        {
+            int fallback = _gainSet.Contains(buffId)
+                ? _config.gainDefaultSeconds
+                : _config.debuffDefaultSeconds;
+
+            int cfgSeconds = 0;
+            foreach (BuffData d in _config.buffs)
+            {
+                if (d.id == buffId)
+                {
+                    cfgSeconds = d.seconds;
+                    break;
+                }
+            }
+
+            return BuffClock.GetDuration(buffId, cfgSeconds, fallback);
+        }
+
         void SetTimer(int plr, int buffId, int ticks)
         {
             if (!_timers.TryGetValue(plr, out Dictionary<int, int> map))
@@ -372,8 +400,8 @@ namespace ShareBuff
         }
 
         /// <summary>
-        /// 是否参与共享：blacklist 优先，其余按 BuffCats 分类表判断。宠物 / 坐骑 / 矿车永不共享。
-        /// 注意：增益表里含 28/29/93/366 等"时间不递减"的 buff，它们照常共享，只是服务器不递减计时。
+        /// 白名单制：只在配置的 gain（或开启 shareDebuff 时的 debuff）列表里才共享。
+        /// 另外两道闸门：blacklist，以及 BuffCats 的宠物 / 坐骑 / 矿车硬排除。
         /// </summary>
         bool CanShare(int buffId)
         {
@@ -381,7 +409,11 @@ namespace ShareBuff
                 return false;
             if (_config.blacklist.Contains(buffId))
                 return false;
-            return BuffCats.IsSharable(buffId, _config.shareDebuff);
+            if (BuffCats.Excluded.Contains(buffId))
+                return false;
+            if (_gainSet.Contains(buffId))
+                return true;
+            return _config.shareDebuff && _debuffSet.Contains(buffId);
         }
 
         #endregion
