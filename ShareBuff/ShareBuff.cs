@@ -55,9 +55,10 @@ namespace ShareBuff
 
             ServerApi.Hooks.GameUpdate.Register(this, OnGameUpdate);
             ServerApi.Hooks.ServerLeave.Register(this, OnServerLeave);
+            ServerApi.Hooks.NetSendData.Register(this, OnSendData);
             GetDataHandlers.PlayerSlot += new EventHandler<GetDataHandlers.PlayerSlotEventArgs>(OnPlayerSlot);
             GeneralHooks.ReloadEvent += OnReload;
-            Commands.ChatCommands.Add(new Command("sharebuff.admin", OnCommand, "sharebuff", "sb"));
+            Commands.ChatCommands.Add(new Command("sharebuff.admin", OnCommand, "sharebuff", "sbuff"));
         }
 
         #region 主循环
@@ -119,6 +120,10 @@ namespace ShareBuff
                 {
                     // 首次见到该玩家：只记快照，不广播（避免进服自带 buff 触发全服）
                     _snapshots[plr.Index] = cur;
+
+                    // trigger 模式的进服补发；mirror 模式由 SyncMirror 持续对齐，无需处理
+                    if (_config.giveOnJoin && !_config.IsMirror)
+                        GiveOnJoin(plr);
                     continue;
                 }
 
@@ -138,6 +143,8 @@ namespace ShareBuff
         {
             var active = new HashSet<int>();
             var players = new List<TSPlayer>();
+            // buffId -> 全服当前剩余时长（取持有者里最大的，这样 gbuff 指定的时长能被沿用）
+            var remain = new Dictionary<int, int>();
 
             foreach (TSPlayer plr in TShock.Players)
             {
@@ -146,8 +153,14 @@ namespace ShareBuff
                 players.Add(plr);
                 foreach (int buffId in CurrentBuffs(plr))
                 {
-                    if (CanShare(buffId))
-                        active.Add(buffId);
+                    if (!CanShare(buffId))
+                        continue;
+
+                    active.Add(buffId);
+
+                    int t = GetTimer(plr.Index, buffId);
+                    if (t > 0 && (!remain.TryGetValue(buffId, out int known) || t > known))
+                        remain[buffId] = t;
                 }
             }
 
@@ -170,10 +183,44 @@ namespace ShareBuff
                     if (cur.Contains(buffId))
                         continue;
 
-                    int ticks = DurationOf(buffId);
+                    int ticks = remain.TryGetValue(buffId, out int r) && r > 0 ? r : DurationOf(buffId);
                     SetTimer(plr.Index, buffId, ticks);
                     plr.SetBuff(buffId, ticks, true);
                 }
+            }
+        }
+
+        /// <summary>
+        /// 进服补发（trigger 模式 + giveOnJoin）：把全服仍在生效的共享 buff 按最大剩余时长补给新玩家。
+        /// 同时登记冷却——补发出去的 buff 会让客户端回 50 包，diff 出"新增"，
+        /// 不压一下会在冷却过期后引发一轮多余的全服重播。
+        /// </summary>
+        void GiveOnJoin(TSPlayer target)
+        {
+            // buffId -> 全服最大剩余时长（取持有者里最大的）
+            var remain = new Dictionary<int, int>();
+            foreach (TSPlayer p in TShock.Players)
+            {
+                if (!IsValid(p) || p.Index == target.Index)
+                    continue;
+
+                foreach (int buffId in CurrentBuffs(p))
+                {
+                    if (!CanShare(buffId))
+                        continue;
+
+                    int t = GetTimer(p.Index, buffId);
+                    if (!remain.TryGetValue(buffId, out int known) || t > known)
+                        remain[buffId] = t;
+                }
+            }
+
+            foreach (var kv in remain)
+            {
+                int ticks = kv.Value > 0 ? kv.Value : DurationOf(kv.Key);
+                SetTimer(target.Index, kv.Key, ticks);
+                _cooldown[kv.Key] = _tick;
+                target.SetBuff(kv.Key, ticks, true);
             }
         }
 
@@ -192,8 +239,36 @@ namespace ShareBuff
                 return;
             _cooldown[buffId] = _tick;
 
-            int ticks = DurationOf(buffId);
+            // 服务器已经下发过（gbuff / 其他插件 / 上一轮广播）就沿用它的时长，不拿估算值覆盖
+            int ticks = GetTimer(src.Index, buffId);
+            if (ticks <= 0)
+                ticks = DurationOf(buffId);
+
             Apply(src, buffId, ticks, _config.takeOverSource);
+        }
+
+        /// <summary>
+        /// 捕获服务器发出的 55 包（PlayerAddBuff）。任何服务器侧下发的 buff——gbuff 命令、
+        /// 其他插件、我们自己的广播——都能在这里拿到确切时长，不必再估算。
+        /// 注意：这里只记账，不能发包，否则会递归。
+        /// </summary>
+        void OnSendData(SendDataEventArgs e)
+        {
+            if (_config == null || !_config.enabled)
+                return;
+            if (e.MsgId != PacketTypes.PlayerAddBuff)
+                return;
+
+            int plr = e.number;
+            if (plr < 0 || plr >= TShock.Players.Length)
+                return;
+
+            int buffId = (int)e.number2;
+            int ticks = (int)e.number3;
+            if (buffId <= 0 || ticks <= 0)
+                return;
+
+            SetTimer(plr, buffId, ticks);
         }
 
         /// <summary>
@@ -276,14 +351,25 @@ namespace ShareBuff
                     p.SendSuccessMessage("ShareBuff 已关闭");
                     break;
                 case "reload":
+                case "r":
                     Reload();
                     p.SendSuccessMessage("已重载 ShareBuff 配置文件");
                     break;
                 case "list":
+                case "l":
                     ListTracked(p);
                     break;
+                case "clear":
+                case "c":
+                    ClearBuffs(args);
+                    break;
                 default:
-                    p.SendInfoMessage("用法：/sharebuff <on|off|reload|list>");
+                    p.SendInfoMessage("用法：/sharebuff <on|off|reload|list|clear>（可简写 /sbuff）");
+                    p.SendInfoMessage("  on     - 开启共享 buff");
+                    p.SendInfoMessage("  off    - 关闭共享 buff");
+                    p.SendInfoMessage("  reload - 重载配置文件");
+                    p.SendInfoMessage("  list   - 查看正在管理的 buff");
+                    p.SendInfoMessage("  clear  - 清除玩家 buff");
                     break;
             }
         }
@@ -310,6 +396,58 @@ namespace ShareBuff
                 p.SendInfoMessage("当前没有在管的 buff");
             else
                 lines.ForEach(p.SendInfoMessage);
+        }
+
+        /// <summary>
+        /// /sbuff clear：清除在线玩家的 buff。协议没有移除包，统一发 55 + time=1 让其自然过期，
+        /// 快照 diff 只看新增项，不会因此触发重新广播。
+        /// </summary>
+        void ClearBuffs(CommandArgs args)
+        {
+            TSPlayer p = args.Player;
+            string what = args.Parameters.Count > 1 ? args.Parameters[1].ToLower() : "help";
+
+            if (what == "help")
+            {
+                p.SendInfoMessage("用法：/sbuff clear <debuff|all|help>");
+                p.SendInfoMessage("  debuff - 清除所有在线玩家的减益");
+                p.SendInfoMessage("  all    - 清除所有在线玩家的全部 buff");
+                return;
+            }
+
+            if (what != "debuff" && what != "all")
+            {
+                p.SendErrorMessage($"无效参数：{what}。用法：/sbuff clear <debuff|all|help>");
+                return;
+            }
+
+            bool all = what == "all";
+            int players = 0, cleared = 0;
+            foreach (TSPlayer plr in TShock.Players)
+            {
+                if (!IsValid(plr))
+                    continue;
+
+                players++;
+                foreach (int buffId in CurrentBuffs(plr))
+                {
+                    if (!all && !IsDebuff(buffId))
+                        continue;
+
+                    plr.SetBuff(buffId, 1, true);
+                    cleared++;
+                }
+            }
+
+            p.SendSuccessMessage($"已为 {players} 名在线玩家清除 {(all ? "全部" : "减益")} buff，共 {cleared} 项");
+        }
+
+        /// <summary>是否减益：debuff 白名单优先；未分类的 id 按非增益、非宠物/坐骑/矿车兜底</summary>
+        bool IsDebuff(int buffId)
+        {
+            if (_debuffSet.Contains(buffId))
+                return true;
+            return !_gainSet.Contains(buffId) && !BuffCats.Excluded.Contains(buffId);
         }
 
         #endregion
@@ -351,6 +489,14 @@ namespace ShareBuff
             }
 
             return BuffClock.GetDuration(buffId, cfgSeconds, fallback);
+        }
+
+        int GetTimer(int plr, int buffId)
+        {
+            return _timers.TryGetValue(plr, out Dictionary<int, int> map) &&
+                   map.TryGetValue(buffId, out int t)
+                ? t
+                : 0;
         }
 
         void SetTimer(int plr, int buffId, int ticks)
@@ -424,9 +570,10 @@ namespace ShareBuff
             {
                 ServerApi.Hooks.GameUpdate.Deregister(this, OnGameUpdate);
                 ServerApi.Hooks.ServerLeave.Deregister(this, OnServerLeave);
+                ServerApi.Hooks.NetSendData.Deregister(this, OnSendData);
                 GetDataHandlers.PlayerSlot -= new EventHandler<GetDataHandlers.PlayerSlotEventArgs>(OnPlayerSlot);
                 GeneralHooks.ReloadEvent -= OnReload;
-                Commands.ChatCommands.RemoveAll(c => c.Names.Contains("sharebuff") || c.Names.Contains("sb"));
+                Commands.ChatCommands.RemoveAll(c => c.Names.Contains("sharebuff") || c.Names.Contains("sbuff"));
             }
             base.Dispose(disposing);
         }

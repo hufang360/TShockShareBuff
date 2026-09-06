@@ -88,6 +88,7 @@
   "cooldownSeconds": 5,
   "shareDebuff": false,
   "detectPotionUse": true,
+  "giveOnJoin": false,
   "buffs": [ { "id": 5, "seconds": 600 } ],
   "gain": [1, 2, 3, ... ],
   "debuff": [20, 21, 22, ... ],
@@ -100,6 +101,7 @@
 - `takeOverSource`：`true` 时连触发者本人的 buff 时长也统一到服务器值（保证全服完全一致）；`false` 时不动触发者
 - `shareDebuff`：`true` 时减益也全服共享（默认 `false`）
 - `detectPotionUse`：检测背包药水消耗以感知"重复喝药"，关闭后退化为靠计时归零自动重开一轮
+- `giveOnJoin`：进服补发（仅 `trigger` 模式，默认 `false`）。玩家进服时把全服仍在生效的共享 buff 按最大剩余时长补给他；`mirror` 模式本身持续对齐并集，无需开启
 - `blacklist`：额外的永不共享 id。宠物 / 坐骑 / 矿车已由 `BuffCats` 硬排除，无需在此列出
 - `gain` / `debuff`：白名单，只有列在里面的 id 才共享
 
@@ -119,8 +121,13 @@
 | `/sharebuff on` / `off` | `sharebuff.admin` | 运行时开关（不写回配置文件） |
 | `/sharebuff reload` | `sharebuff.admin` | 重载 `config.json` |
 | `/sharebuff list` | `sharebuff.admin` | 列出每个玩家当前在管的 buff 及服务器计时的剩余秒数，用于核对计时是否准确 |
+| `/sharebuff clear debuff` | `sharebuff.admin` | 清除所有在线玩家的减益 |
+| `/sharebuff clear all` | `sharebuff.admin` | 清除所有在线玩家的全部 buff |
+| `/sharebuff clear help` | `sharebuff.admin` | 查看 clear 用法（`/sharebuff clear` 无参同效） |
 
-别名：`/sb`
+别名：`/sbuff`
+
+`clear` 的实现：协议没有移除 buff 的专用包，对每个目标 buff 发 `55 + time=1` 让其 1 tick 后自然过期；debuff 的判定为 `debuff` 白名单优先，未分类 id 按"非增益且非宠物/坐骑/矿车"兜底。
 
 ## 5. 实现结构
 

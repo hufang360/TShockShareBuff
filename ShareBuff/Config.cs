@@ -35,6 +35,12 @@ namespace ShareBuff
         public bool detectPotionUse = true;
 
         /// <summary>
+        /// 进服补发（仅 trigger 模式）：玩家进服时，把全服仍在生效的共享 buff 按剩余时长补给他。
+        /// mirror 模式本身就持续对齐并集，无需此开关。
+        /// </summary>
+        public bool giveOnJoin = false;
+
+        /// <summary>
         /// 逐条指定 buff 时长（秒），优先级最高，高于药水时长。
         /// 想给某个 buff 固定时长就在这里加一条：{ "id": 5, "seconds": 600 }
         /// </summary>
@@ -67,6 +73,10 @@ namespace ShareBuff
             var c = new Config();
             c.gain = BuffCats.Gain.OrderBy(x => x).ToList();
             c.debuff = BuffCats.Debuff.OrderBy(x => x).ToList();
+            // TShock 禁用玩家 / 非法装备时会下发 Frozen(47) Webbed(69) Stoned(156)，
+            // 默认拉黑，免得开了 shareDebuff 后“一个人被禁用、全服跟着被定身”
+            // 冰冻, 灵液, 石化
+            c.blacklist = new List<int> { 47, 69, 156 };
             File.WriteAllText(path, JsonConvert.SerializeObject(c, Formatting.Indented));
             return c;
         }
