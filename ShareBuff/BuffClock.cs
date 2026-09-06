@@ -14,10 +14,10 @@ namespace ShareBuff
     public class BuffClock
     {
         // buffId -> ticks（由 Item.buffTime 汇总而来）
-        static readonly Dictionary<int, int> _buffTime = new Dictionary<int, int>();
+        static readonly Dictionary<int, int> _buffTime = [];
 
         // itemId -> (buffType, buffTime)
-        static readonly Dictionary<int, (int type, int time)> _itemBuff = new Dictionary<int, (int, int)>();
+        static readonly Dictionary<int, (int type, int time)> _itemBuff = [];
 
         static bool _built;
         static bool _failed;
@@ -94,6 +94,30 @@ namespace ShareBuff
             return _itemBuff.TryGetValue(itemId, out var v) ? v : (0, 0);
         }
 
+        /// <summary>
+        /// 反向索引：buffType -> 赋予它的物品清单（物品 id + 物品自带的名义时长 ticks）。
+        /// 供 /sbuff reference 生成参考文档用；建表失败返回空表。
+        /// </summary>
+        public static Dictionary<int, List<(int itemId, int ticks)>> GetBuffSources()
+        {
+            Build();
+            var map = new Dictionary<int, List<(int itemId, int ticks)>>();
+            if (_failed)
+                return map;
+
+            foreach (var kv in _itemBuff)
+            {
+                (int type, int time) = kv.Value;
+                if (!map.TryGetValue(type, out List<(int itemId, int ticks)> list))
+                    map[type] = list = new List<(int itemId, int ticks)>();
+                list.Add((kv.Key, time));
+            }
+
+            foreach (List<(int itemId, int ticks)> list in map.Values)
+                list.Sort((a, b) => a.itemId.CompareTo(b.itemId));
+            return map;
+        }
+
         /// <summary>该 buff 的时间不递减（宠物类），服务器也不该递减它</summary>
         public static bool NoDecrease(int buffId)
         {
@@ -102,8 +126,12 @@ namespace ShareBuff
 
         public static int SecondsToTicks(int seconds)
         {
+            // 负数视为无效返回 0（SetBuff 会静默丢弃），不能落进上限分支变成 415 天
+            if (seconds <= 0)
+                return 0;
+
             long ticks = (long)seconds * 60;
-            if (seconds < 0 || ticks > TickLimit)
+            if (ticks > TickLimit)
                 return TickLimit;
             return (int)ticks;
         }

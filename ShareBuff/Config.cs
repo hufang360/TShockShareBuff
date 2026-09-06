@@ -29,7 +29,7 @@ namespace ShareBuff
         public int cooldownSeconds = 5;
 
         /// <summary>是否共享减益。开启后 debuff 白名单里的 id 也参与共享</summary>
-        public bool shareDebuff = false;
+        public bool shareDebuff = true;
 
         /// <summary>检测背包药水消耗，用于处理“重复喝药客户端刷新时长”</summary>
         public bool detectPotionUse = true;

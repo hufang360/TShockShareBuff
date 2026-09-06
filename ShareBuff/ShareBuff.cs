@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using Terraria;
 using Terraria.ID;
 using TerrariaApi.Server;
@@ -91,29 +92,40 @@ namespace ShareBuff
             foreach (var kv in _timers)
             {
                 int plr = kv.Key;
-                foreach (int buffId in kv.Value.Keys.ToList())
+                Dictionary<int, int> map = kv.Value;
+
+                // 到期不代表要移除（可能要重开一轮），先收集；遍历中不能改结构
+                _expired.Clear();
+                foreach (KeyValuePair<int, int> bk in map)
                 {
-                    if (BuffClock.NoDecrease(buffId))
+                    if (BuffClock.NoDecrease(bk.Key))
                         continue;
 
-                    if (kv.Value[buffId]-- > 0)
+                    if (map[bk.Key]-- > 0)
                         continue;
+                    _expired.Add(bk.Key);
+                }
 
+                foreach (int buffId in _expired)
+                {
                     TSPlayer plrObj = TShock.Players[plr];
                     if (IsValid(plrObj) && CurrentBuffs(plrObj).Contains(buffId))
                     {
                         // 客户端还挂着：说明服务器估短了，或玩家重复喝药刷新过。重开一轮。
-                        kv.Value[buffId] = DurationOf(buffId);
+                        map[buffId] = DurationOf(buffId);
                     }
                     else
                     {
-                        kv.Value.Remove(buffId);
+                        map.Remove(buffId);
                     }
                 }
             }
         }
 
-        /// <summary>扫描全服 buff，diff 出新增项并广播</summary>
+        // TickTimers 复用的到期清单，避免每玩家每 tick 分配
+        readonly List<int> _expired = new List<int>();
+
+        /// <summary>扫描全服 buff，diff 出新增项并广播。快照原地更新，主循环不产生新分配</summary>
         void ScanBuffs()
         {
             foreach (TSPlayer plr in TShock.Players)
@@ -121,12 +133,13 @@ namespace ShareBuff
                 if (!IsValid(plr))
                     continue;
 
-                HashSet<int> cur = CurrentBuffs(plr);
-
-                if (!_snapshots.TryGetValue(plr.Index, out HashSet<int> prev))
+                int idx = plr.Index;
+                if (!_snapshots.TryGetValue(idx, out HashSet<int> prev))
                 {
                     // 首次见到该玩家：只记快照，不广播（避免进服自带 buff 触发全服）
-                    _snapshots[plr.Index] = cur;
+                    var first = new HashSet<int>();
+                    FillBuffs(plr, first);
+                    _snapshots[idx] = first;
 
                     // trigger 模式的进服补发；mirror 模式由 SyncMirror 持续对齐，无需处理
                     if (_config.giveOnJoin && !_config.IsMirror)
@@ -134,19 +147,24 @@ namespace ShareBuff
                     continue;
                 }
 
-                foreach (int buffId in cur)
+                // 先 diff 新增：buffType 里 prev 没有的就是新增
+                int[] buffType = plr.TPlayer.buffType;
+                for (int i = 0; i < Player.maxBuffs; i++)
                 {
-                    if (prev.Contains(buffId))
+                    int b = buffType[i];
+                    if (b <= 0 || prev.Contains(b))
                         continue;
 
                     // 服务器自己刚下发的 buff：客户端回声不算新增，不重播
-                    if (_supplied.TryGetValue(plr.Index, out HashSet<int> supplied) && supplied.Remove(buffId))
+                    if (_supplied.TryGetValue(idx, out HashSet<int> supplied) && supplied.Remove(b))
                         continue;
 
-                    OnBuffGained(plr, buffId);
+                    OnBuffGained(plr, b);
                 }
 
-                _snapshots[plr.Index] = cur;
+                // 快照原地更新，避免每玩家每 tick 分配新集合
+                prev.Clear();
+                FillBuffs(plr, prev);
             }
         }
 
@@ -345,8 +363,20 @@ namespace ShareBuff
             _config = Config.Load(Path.Combine(SaveDir, "config.json"));
             _gainSet = new HashSet<int>(_config.gain);
             _debuffSet = new HashSet<int>(_config.debuff);
+
+            // buffs 表建索引（重复 id 时先出现的生效，与旧的线性扫描一致）
+            _cfgBuffSeconds = new Dictionary<int, int>();
+            foreach (BuffData d in _config.buffs)
+            {
+                if (d.id > 0 && !_cfgBuffSeconds.ContainsKey(d.id))
+                    _cfgBuffSeconds[d.id] = d.seconds;
+            }
+
             BuffClock.Reset();
         }
+
+        // buffs 配置表的 id -> seconds 索引，Reload 时重建
+        static Dictionary<int, int> _cfgBuffSeconds = new Dictionary<int, int>();
 
         #endregion
 
@@ -380,13 +410,18 @@ namespace ShareBuff
                 case "c":
                     ClearBuffs(args);
                     break;
+                case "reference":
+                case "ref":
+                    GenerateReference(p);
+                    break;
                 default:
-                    p.SendInfoMessage("用法：/sharebuff <on|off|reload|list|clear>（可简写 /sbuff）");
-                    p.SendInfoMessage("  on     - 开启共享 buff");
-                    p.SendInfoMessage("  off    - 关闭共享 buff");
-                    p.SendInfoMessage("  reload - 重载配置文件");
-                    p.SendInfoMessage("  list   - 查看正在管理的 buff");
-                    p.SendInfoMessage("  clear  - 清除玩家 buff");
+                    p.SendInfoMessage("用法：/sharebuff <on|off|reload|list|clear|reference>（可简写 /sbuff）");
+                    p.SendInfoMessage("  on        - 开启共享 buff");
+                    p.SendInfoMessage("  off       - 关闭共享 buff");
+                    p.SendInfoMessage("  reload    - 重载配置文件");
+                    p.SendInfoMessage("  list      - 查看正在管理的 buff");
+                    p.SendInfoMessage("  clear     - 清除玩家 buff");
+                    p.SendInfoMessage("  reference - 在配置目录生成 buff 时长参考文档（.md），可简写 ref");
                     break;
             }
         }
@@ -454,6 +489,16 @@ namespace ShareBuff
                     plr.SetBuff(buffId, 1, true);
                     cleared++;
                 }
+
+                // SetBuff 触发的 55 包会被 OnSendData 记成 timer=1，NoDecrease 类（宠物等）永不递减，这里统一清账
+                if (_timers.TryGetValue(plr.Index, out Dictionary<int, int> map))
+                {
+                    foreach (int buffId in map.Keys.ToList())
+                    {
+                        if (all || IsDebuff(buffId))
+                            map.Remove(buffId);
+                    }
+                }
             }
 
             p.SendSuccessMessage($"已为 {players} 名在线玩家清除 {(all ? "全部" : "减益")} buff，共 {cleared} 项");
@@ -465,6 +510,145 @@ namespace ShareBuff
             if (_debuffSet.Contains(buffId))
                 return true;
             return !_gainSet.Contains(buffId) && !BuffCats.Excluded.Contains(buffId);
+        }
+
+        /// <summary>
+        /// /sbuff reference（ref）：在配置目录生成 buff 时长参考文档（.md）。
+        /// 覆盖范围：物品能赋予的 buff ∪ 配置白名单（gain/debuff）∪ 配置 buffs 时长覆盖。
+        /// 数据来源：BuffClock 建表（全部物品的 buffType/buffTime）+ 当前配置黑名单 / 白名单 / 时长覆盖。
+        /// </summary>
+        void GenerateReference(TSPlayer p)
+        {
+            try
+            {
+                BuffClock.Build(); // 命令阶段游戏内容已加载，可安全建表
+                Dictionary<int, List<(int itemId, int ticks)>> sources = BuffClock.GetBuffSources();
+
+                var ids = new SortedSet<int>(sources.Keys);
+                foreach (int id in _config.gain) ids.Add(id);
+                foreach (int id in _config.debuff) ids.Add(id);
+                foreach (BuffData d in _config.buffs)
+                {
+                    if (d.id > 0)
+                        ids.Add(d.id);
+                }
+
+                var rows = new Dictionary<string, List<string>>();
+                foreach (int id in ids)
+                {
+                    string cat = "未分类";
+                    if (BuffCats.Gain.Contains(id)) cat = "增益";
+                    else if (BuffCats.Debuff.Contains(id)) cat = "减益";
+                    else if (BuffCats.Pet.Contains(id)) cat = "宠物";
+                    else if (BuffCats.Mount.Contains(id)) cat = "坐骑";
+                    else if (BuffCats.Minecart.Contains(id)) cat = "矿车";
+
+                    bool excluded = cat is "宠物" or "坐骑" or "矿车";
+                    bool noDecrease = BuffClock.NoDecrease(id);
+
+                    string name = TShock.Utils.GetBuffName(id);
+                    if (string.IsNullOrEmpty(name))
+                        name = "未知";
+
+                    // 物品来源：id + 名称 + 各自时长
+                    string items = "—";
+                    if (sources.TryGetValue(id, out var list) && list.Count > 0)
+                    {
+                        items = string.Join("<br>", list.Select(it =>
+                        {
+                            string iname = Lang.GetItemName(it.itemId).Value;
+                            if (string.IsNullOrEmpty(iname))
+                                iname = "?";
+                            string tag = it.ticks > 0 && it.ticks <= 2 ? "（持续）" : $"（{FmtTicks(it.ticks)}）";
+                            return $"{it.itemId} {iname}{tag}";
+                        }));
+                    }
+
+                    // 时长：不递减恒为持续；宠物/坐骑/矿车不共享、不做无意义的估算，直接留空
+                    string dur = noDecrease ? "持续（不递减）" : excluded ? "—" : FmtTicks(DurationOf(id));
+
+                    // 备注：如非必要不填——异常状态（黑名单/时长覆盖/不参与共享）才写
+                    var notes = new List<string>();
+                    if (_config.blacklist.Contains(id))
+                        notes.Add("在 blacklist 黑名单");
+                    if (_cfgBuffSeconds.TryGetValue(id, out int cfgSec))
+                        notes.Add($"配置覆盖 {cfgSec}s");
+                    switch (cat)
+                    {
+                        case "增益":
+                            if (!_gainSet.Contains(id))
+                                notes.Add("不在白名单，不参与共享");
+                            else if (!sources.ContainsKey(id))
+                                notes.Add("无物品来源");
+                            break;
+                        case "减益":
+                            if (!_debuffSet.Contains(id))
+                                notes.Add("不在白名单，不参与共享");
+                            else if (!_config.shareDebuff)
+                                notes.Add("需开 shareDebuff 才共享");
+                            else if (!sources.ContainsKey(id))
+                                notes.Add("无物品来源");
+                            break;
+                        case "未分类":
+                            if (!_gainSet.Contains(id) && !_debuffSet.Contains(id))
+                                notes.Add("不在白名单，不参与共享");
+                            if (!sources.ContainsKey(id))
+                                notes.Add("无物品来源");
+                            break;
+                    }
+
+                    if (!rows.TryGetValue(cat, out List<string> catRows))
+                        rows[cat] = catRows = new List<string>();
+                    catRows.Add($"| {id} | {name} | {dur} | {items} | {string.Join("；", notes)} |");
+                }
+
+                var sb = new StringBuilder();
+                sb.AppendLine("# ShareBuff · buff 时长参考");
+                sb.AppendLine();
+                sb.AppendLine($"生成时间：{DateTime.Now:yyyy-MM-dd HH:mm:ss}　共 {ids.Count} 条");
+                sb.AppendLine();
+                sb.AppendLine("说明：");
+                sb.AppendLine("- **时长**为服务器实际采用的时长，优先级：buffs 表配置秒数 > 物品自带时长 > 分类兜底（gainDefaultSeconds / debuffDefaultSeconds）。");
+                sb.AppendLine("- **物品**列列出该 buff 的物品来源（id + 名称），同一 buff 多个来源用 `<br>` 分隔；`(持续)` 表示装备/手持类每帧续命，不按此计时。");
+                sb.AppendLine("- 宠物 / 坐骑 / 矿车被 BuffCats 硬排除，不参与共享，仅作参考列出。");
+
+                // 按类别分表输出
+                string[] order = ["增益", "减益", "宠物", "坐骑", "矿车", "未分类"];
+                foreach (string cat in order)
+                {
+                    if (!rows.TryGetValue(cat, out List<string> catRows) || catRows.Count == 0)
+                        continue;
+
+                    sb.AppendLine();
+                    sb.AppendLine($"## {cat}（{catRows.Count} 条）");
+                    sb.AppendLine();
+                    sb.AppendLine("| buffId | 名称 | 时长 | 物品（id + 名称） | 备注 |");
+                    sb.AppendLine("|---|---|---|---|---|");
+                    foreach (string line in catRows)
+                        sb.AppendLine(line);
+                }
+
+                string path = Path.Combine(SaveDir, "buff_time_ref.md");
+                Directory.CreateDirectory(SaveDir);
+                File.WriteAllText(path, sb.ToString(), new UTF8Encoding(false));
+                p.SendSuccessMessage($"已生成 buff 时长参考文档：{path}（{ids.Count} 条）");
+            }
+            catch (Exception ex)
+            {
+                TShock.Log.Error($"[ShareBuff] 生成 buff 参考文档失败：{ex}");
+                p.SendErrorMessage("生成参考文档失败，详见服务器日志");
+            }
+        }
+
+        /// <summary>ticks 转 分/秒 展示</summary>
+        static string FmtTicks(int ticks)
+        {
+            if (ticks <= 0)
+                return "0s";
+            int sec = ticks / 60;
+            if (sec >= 60)
+                return $"{sec / 60}分{sec % 60}秒";
+            return $"{sec}秒";
         }
 
         #endregion
@@ -498,15 +682,7 @@ namespace ShareBuff
                 ? _config.gainDefaultSeconds
                 : _config.debuffDefaultSeconds;
 
-            int cfgSeconds = 0;
-            foreach (BuffData d in _config.buffs)
-            {
-                if (d.id == buffId)
-                {
-                    cfgSeconds = d.seconds;
-                    break;
-                }
-            }
+            _cfgBuffSeconds.TryGetValue(buffId, out int cfgSeconds);
 
             return BuffClock.GetDuration(buffId, cfgSeconds, fallback);
         }
@@ -571,6 +747,12 @@ namespace ShareBuff
         static HashSet<int> CurrentBuffs(TSPlayer plr)
         {
             var set = new HashSet<int>();
+            FillBuffs(plr, set);
+            return set;
+        }
+
+        static void FillBuffs(TSPlayer plr, HashSet<int> set)
+        {
             int[] buffType = plr.TPlayer.buffType;
             for (int i = 0; i < Player.maxBuffs; i++)
             {
@@ -578,7 +760,6 @@ namespace ShareBuff
                 if (b > 0)
                     set.Add(b);
             }
-            return set;
         }
 
         bool IsValid(TSPlayer plr)

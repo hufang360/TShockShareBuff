@@ -9,8 +9,8 @@ namespace ShareBuff
     public static class BuffCats
     {
         /// <summary>Gain（105 条）</summary>
-        public static readonly HashSet<int> Gain = new HashSet<int>
-        {
+        public static readonly HashSet<int> Gain =
+        [
             1,  // 黑曜石皮
             2,  // 再生
             3,  // 敏捷
@@ -116,11 +116,11 @@ namespace ShareBuff
             376,  // 火把祝福
             383,  // 放飞心灵
             396,  // 魔力涌动
-        };
+        ];
 
         /// <summary>Debuff（87 条）</summary>
-        public static readonly HashSet<int> Debuff = new HashSet<int>
-        {
+        public static readonly HashSet<int> Debuff =
+        [
             20,  // 中毒
             21,  // 耐药性
             22,  // 黑暗
@@ -208,11 +208,11 @@ namespace ShareBuff
             398,  // 加速痛苦
             399,  // 电击
             400,  // 电击
-        };
+        ];
 
         /// <summary>Pet（120 条）</summary>
-        public static readonly HashSet<int> Pet = new HashSet<int>
-        {
+        public static readonly HashSet<int> Pet =
+        [
             19, 27, 40, 41, 42, 45, 49, 50, 51, 52,
             53, 54, 55, 56, 57, 61, 64, 65, 66, 81,
             82, 83, 84, 85, 90, 91, 92, 101, 102, 125,
@@ -225,30 +225,30 @@ namespace ShareBuff
             317, 322, 325, 327, 328, 329, 330, 331, 335, 341,
             345, 349, 351, 352, 354, 355, 356, 365, 371, 372,
             373, 382, 385, 386, 387, 388, 389, 390, 393, 394,
-        };
+        ];
 
         /// <summary>Mount（34 条）</summary>
-        public static readonly HashSet<int> Mount = new HashSet<int>
-        {
+        public static readonly HashSet<int> Mount =
+        [
             128, 129, 130, 131, 132, 141, 142, 143, 162, 168,
             193, 212, 275, 276, 277, 278, 279, 280, 281, 282,
             283, 305, 318, 342, 370, 374, 377, 378, 379, 380,
             381, 384, 391, 392,
-        };
+        ];
 
         /// <summary>Minecart（54 条）</summary>
-        public static readonly HashSet<int> Minecart = new HashSet<int>
-        {
+        public static readonly HashSet<int> Minecart =
+        [
             118, 138, 166, 167, 184, 185, 208, 209, 210, 211,
             220, 221, 222, 223, 224, 225, 226, 227, 228, 229,
             231, 232, 233, 234, 235, 236, 237, 238, 239, 240,
             241, 242, 243, 244, 245, 246, 247, 248, 249, 250,
             251, 252, 253, 254, 255, 256, 269, 270, 272, 273,
             338, 339, 346, 347,
-        };
+        ];
 
         /// <summary>永不共享：宠物 + 坐骑 + 矿车</summary>
-        public static readonly HashSet<int> Excluded = new HashSet<int>();
+        public static readonly HashSet<int> Excluded = [];
 
         static BuffCats()
         {
