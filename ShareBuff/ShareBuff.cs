@@ -37,6 +37,13 @@ namespace ShareBuff
         // buff id -> 上次广播时的 tick（防回环）
         readonly Dictionary<int, long> _cooldown = new Dictionary<int, long>();
 
+        // buff id -> 最近一次全服广播的 (起始 tick, 总时长)。
+        // 持有者没有服务器计时（如 takeOverSource=false 时的触发者本人）时，用它反推剩余时长
+        readonly Dictionary<int, (long tick, int total)> _origin = new Dictionary<int, (long, int)>();
+
+        // 玩家 index -> 服务器已下发、尚未收到客户端回声的 buff（回声不算新增，不重播）
+        readonly Dictionary<int, HashSet<int>> _supplied = new Dictionary<int, HashSet<int>>();
+
         // 玩家 index -> 背包槽位 -> (物品 id, 数量)（用于检测喝药）
         readonly Dictionary<int, Dictionary<short, (short type, short stack)>> _inv =
             new Dictionary<int, Dictionary<short, (short type, short stack)>>();
@@ -131,6 +138,11 @@ namespace ShareBuff
                 {
                     if (prev.Contains(buffId))
                         continue;
+
+                    // 服务器自己刚下发的 buff：客户端回声不算新增，不重播
+                    if (_supplied.TryGetValue(plr.Index, out HashSet<int> supplied) && supplied.Remove(buffId))
+                        continue;
+
                     OnBuffGained(plr, buffId);
                 }
 
@@ -158,7 +170,7 @@ namespace ShareBuff
 
                     active.Add(buffId);
 
-                    int t = GetTimer(plr.Index, buffId);
+                    int t = RemainingOf(buffId, GetTimer(plr.Index, buffId));
                     if (t > 0 && (!remain.TryGetValue(buffId, out int known) || t > known))
                         remain[buffId] = t;
                 }
@@ -185,6 +197,7 @@ namespace ShareBuff
 
                     int ticks = remain.TryGetValue(buffId, out int r) && r > 0 ? r : DurationOf(buffId);
                     SetTimer(plr.Index, buffId, ticks);
+                    GetSupplied(plr.Index).Add(buffId);
                     plr.SetBuff(buffId, ticks, true);
                 }
             }
@@ -192,8 +205,8 @@ namespace ShareBuff
 
         /// <summary>
         /// 进服补发（trigger 模式 + giveOnJoin）：把全服仍在生效的共享 buff 按最大剩余时长补给新玩家。
-        /// 同时登记冷却——补发出去的 buff 会让客户端回 50 包，diff 出"新增"，
-        /// 不压一下会在冷却过期后引发一轮多余的全服重播。
+        /// 剩余时长反推见 RemainingOf；下发的 buff 登记 _supplied，
+        /// 客户端回 50 包时被 ScanBuffs 识别为回声，不再当新增重播一轮。
         /// </summary>
         void GiveOnJoin(TSPlayer target)
         {
@@ -209,17 +222,20 @@ namespace ShareBuff
                     if (!CanShare(buffId))
                         continue;
 
-                    int t = GetTimer(p.Index, buffId);
+                    int t = RemainingOf(buffId, GetTimer(p.Index, buffId));
                     if (!remain.TryGetValue(buffId, out int known) || t > known)
                         remain[buffId] = t;
                 }
             }
 
+            // 目标已持有的（如 SSC 进服自带）不登记回声，避免误吞他之后真正的新增
+            HashSet<int> has = CurrentBuffs(target);
             foreach (var kv in remain)
             {
                 int ticks = kv.Value > 0 ? kv.Value : DurationOf(kv.Key);
                 SetTimer(target.Index, kv.Key, ticks);
-                _cooldown[kv.Key] = _tick;
+                if (!has.Contains(kv.Key))
+                    GetSupplied(target.Index).Add(kv.Key);
                 target.SetBuff(kv.Key, ticks, true);
             }
         }
@@ -315,6 +331,7 @@ namespace ShareBuff
             _timers.Remove(args.Who);
             _snapshots.Remove(args.Who);
             _inv.Remove(args.Who);
+            _supplied.Remove(args.Who);
         }
 
         void OnReload(ReloadEventArgs args)
@@ -457,6 +474,9 @@ namespace ShareBuff
         /// <summary>给全服（可含触发者本人）下发 buff 并登记计时</summary>
         void Apply(TSPlayer src, int buffId, int ticks, bool includeSource)
         {
+            // 记录广播起点：之后给无计时的持有者（如 takeOverSource=false 的触发者）反推剩余时长用
+            _origin[buffId] = (_tick, ticks);
+
             foreach (TSPlayer p in TShock.Players)
             {
                 if (!IsValid(p))
@@ -489,6 +509,35 @@ namespace ShareBuff
             }
 
             return BuffClock.GetDuration(buffId, cfgSeconds, fallback);
+        }
+
+        /// <summary>
+        /// 反推 buff 的全服剩余时长（tick）：优先持有者的服务器计时；
+        /// 无计时（如 takeOverSource=false 时的触发者本人）时，按最近一次广播的起点 + 总时长折算。
+        /// 返回 0 表示无法确定，由调用方兜底。
+        /// </summary>
+        int RemainingOf(int buffId, int holderTimer)
+        {
+            if (holderTimer > 0)
+                return holderTimer;
+
+            if (_origin.TryGetValue(buffId, out (long tick, int total) o))
+            {
+                long left = o.total - (_tick - o.tick);
+                if (left > 0)
+                    return left > int.MaxValue ? int.MaxValue : (int)left;
+            }
+            return 0;
+        }
+
+        HashSet<int> GetSupplied(int plr)
+        {
+            if (!_supplied.TryGetValue(plr, out HashSet<int> set))
+            {
+                set = new HashSet<int>();
+                _supplied[plr] = set;
+            }
+            return set;
         }
 
         int GetTimer(int plr, int buffId)

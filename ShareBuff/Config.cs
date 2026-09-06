@@ -44,22 +44,27 @@ namespace ShareBuff
         /// 逐条指定 buff 时长（秒），优先级最高，高于药水时长。
         /// 想给某个 buff 固定时长就在这里加一条：{ "id": 5, "seconds": 600 }
         /// </summary>
-        public List<BuffData> buffs = new List<BuffData>();
+        public List<BuffData> buffs = [];
 
         /// <summary>增益白名单：只有这里列出的 id 才会共享（默认 105 条）</summary>
         [JsonConverter(typeof(IntListCompactConverter))]
-        public List<int> gain = new List<int>();
+        public List<int> gain = [];
 
         /// <summary>减益白名单：shareDebuff 为 true 时才生效（默认 87 条）</summary>
         [JsonConverter(typeof(IntListCompactConverter))]
-        public List<int> debuff = new List<int>();
+        public List<int> debuff = [];
 
-        /// <summary>额外的永不共享 id。宠物 / 坐骑 / 矿车已由 BuffCats 硬排除，无需在此列出</summary>
+        /// <summary>
+        /// 黑名单
+        /// 额外的永不共享 id
+        /// 宠物 / 坐骑 / 矿车已由 BuffCats 硬排除，无需在此列出
+        /// 即使gain和debuff里定义过，这里也可以重复写
+        /// </summary>
         [JsonConverter(typeof(IntListCompactConverter))]
-        public List<int> blacklist = new List<int>();
+        public List<int> blacklist = [];
 
         /// <summary>不参与共享的玩家名</summary>
-        public List<string> exclude = new List<string>();
+        public List<string> exclude = [];
 
         [JsonIgnore]
         public bool IsMirror => string.Equals(mode, "mirror", System.StringComparison.OrdinalIgnoreCase);
@@ -71,12 +76,20 @@ namespace ShareBuff
 
             // 首次生成：把 wiki 分类表的 Gain / Debuff 填进去作为白名单初值
             var c = new Config();
-            c.gain = BuffCats.Gain.OrderBy(x => x).ToList();
-            c.debuff = BuffCats.Debuff.OrderBy(x => x).ToList();
+            c.gain = [.. BuffCats.Gain.OrderBy(x => x)];
+            c.debuff = [.. BuffCats.Debuff.OrderBy(x => x)];
             // TShock 禁用玩家 / 非法装备时会下发 Frozen(47) Webbed(69) Stoned(156)，
             // 默认拉黑，免得开了 shareDebuff 后“一个人被禁用、全服跟着被定身”
-            // 冰冻, 灵液, 石化
-            c.blacklist = new List<int> { 47, 69, 156 };
+            c.blacklist =
+            [
+                21, // 耐药性
+                47, // 冰冻
+                68, // 窒息
+                147, // 旗帜
+                156, // 石化
+                199, // 创意震撼
+                396 // 魔力涌动
+            ];
             File.WriteAllText(path, JsonConvert.SerializeObject(c, Formatting.Indented));
             return c;
         }
@@ -92,7 +105,7 @@ namespace ShareBuff
     }
 
     /// <summary>
-    /// 把 List&lt;int&gt; 写成一行，避免几百个 id 每人一行把配置文件撑爆。
+    /// 把 List <int> 写成一行，避免几百个 id 每人一行把配置文件撑爆。
     /// </summary>
     public class IntListCompactConverter : JsonConverter
     {
