@@ -5,6 +5,7 @@ namespace ShareBuff
     /// <summary>
     /// buff 分类表，数据取自 tr-wiki/buff_categories.md（共 400 条增益/减益/宠物/坐骑/矿车，彼此无交集）。
     /// 宠物、坐骑、矿车不参与共享；其余按 Gain / Debuff 区分。
+    /// https://terraria.wiki.gg/zh/wiki/增益_ID
     /// </summary>
     public static class BuffCats
     {

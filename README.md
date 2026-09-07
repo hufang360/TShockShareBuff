@@ -28,7 +28,7 @@
 - 已持有该 buff 时走 `AddBuff_TryUpdatingExistingBuffTime`，取 `max(旧值, T)`（`Player.cs:5394-5418`）——补发只会延长、不会缩短，可利用这一点"接管"。
 - 等价写法 `TSPlayer.SetBuff(id, ticks, bypass: true)`；**必须 bypass**，否则会被 `LastThreat` 5 秒节流丢弃（TSPlayer.cs:2412-2418）。
 - 时间单位是 tick（1/60 秒），上限 `int.MaxValue/60 - 1`。
-- 移除 buff 没有专用包，只能发 `55 + time=1` 让其自然消失。
+- 移除 buff 没有专用包，且 `55 + time=1` 对已持有 buff 无效——客户端 `AddBuff` 只延长不缩短（见 5. 命令中 clear 的实现）。
 
 **倒计时边界（原版规则，服务器需对齐）**
 
@@ -88,7 +88,8 @@
   "cooldownSeconds": 5,
   "shareDebuff": false,
   "detectPotionUse": true,
-  "giveOnJoin": false,
+  "giveOnJoin": true,
+  "debug": false,
   "buffs": [ { "id": 5, "seconds": 600 } ],
   "gain": [1, 2, 3, ... ],
   "debuff": [20, 21, 22, ... ],
@@ -100,8 +101,9 @@
 - `mode`：`trigger` | `mirror`
 - `takeOverSource`：`true` 时连触发者本人的 buff 时长也统一到服务器值（保证全服完全一致）；`false` 时不动触发者
 - `shareDebuff`：`true` 时减益也全服共享（默认 `false`）
-- `detectPotionUse`：检测背包药水消耗以感知"重复喝药"，关闭后退化为靠计时归零自动重开一轮
-- `giveOnJoin`：进服补发（仅 `trigger` 模式，默认 `false`）。玩家进服时把全服仍在生效的共享 buff 按**剩余时长**补给他；`mirror` 模式本身持续对齐并集，无需开启
+- `detectPotionUse`：检测背包药水消耗以感知"重复喝药"，同步服务器计时并重新广播一轮——其他玩家该 buff 的时长随之重算（已过期的重新获得）。关闭后退化为靠计时归零自动重开一轮
+- `giveOnJoin`：进服补发（仅 `trigger` 模式，默认 `true`）。玩家进服时把全服仍在生效的共享 buff 按**剩余时长**补给他；`mirror` 模式本身持续对齐并集，无需开启
+- `debug`：调试日志（默认 `false`）。输出广播 / 喝药 / 清账等决策细节到服务器日志，排查用
 - `blacklist`：额外的永不共享 id。宠物 / 坐骑 / 矿车已由 `BuffCats` 硬排除，无需在此列出
 - `gain` / `debuff`：白名单，只有列在里面的 id 才共享
 
@@ -134,12 +136,15 @@
 | `/sharebuff clear debuff` | `sharebuff.admin` | 清除所有在线玩家的减益 |
 | `/sharebuff clear all` | `sharebuff.admin` | 清除所有在线玩家的全部 buff |
 | `/sharebuff clear help` | `sharebuff.admin` | 查看 clear 用法（`/sharebuff clear` 无参同效） |
+| `/sharebuff clearplayer <玩家名> <debuff\|all>` | `sharebuff.admin` | 清除指定玩家的减益或全部 buff（简写 `/sbuff cp`，支持带空格的玩家名） |
+| `/sharebuff config` | `sharebuff.admin` | 查看 / 修改配置项，校验通过后写回 `config.json` |
+| `/sharebuff docs` | `sharebuff.admin` | 在配置目录生成 buff 时长参考文档（.md） |
 
 别名：`/sbuff`
 
-`clear` 的实现：协议没有移除 buff 的专用包，对每个目标 buff 发 `55 + time=1` 让其 1 tick 后自然过期；debuff 的判定为 `debuff` 白名单优先，未分类 id 按"非增益且非宠物/坐骑/矿车"兜底。
+`clear` 的实现：直接清服务器端 `buffType`/`buffTime` 数组，再广播 50 包（PlayerBuff）让客户端覆盖该玩家的 buff 列表。两个协议坑：① `55 + time=1` 无效——客户端 `AddBuff` 对已有 buff 只延长不缩短；② 50 包副作用——客户端会把列表内所有 buff 的 `buffTime` 硬写成 60（1 秒），SSC 下保留的增益会立刻过期，所以清完紧跟 55 包把保留项时长灌回去（时长取服务器计时，反推不到时用分类时长兜底）。debuff 的判定为 `debuff` 白名单优先，未分类 id 按"非增益且非宠物/坐骑/矿车"兜底。
 
-## 5. 实现结构
+## 6. 实现结构
 
 ```
 ShareBuff/
@@ -149,10 +154,10 @@ ShareBuff/
   BuffCats.cs    buff 分类表（增益/减益/宠物/坐骑/矿车），由 wiki 文档生成
 ```
 
-## 6. 风险与对策
+## 7. 风险与对策
 
 - **时长取值的误差场景**：`Item.buffTime` 建表拿到的是"名义时长"。重叠喝药、专家/大师难度对 debuff 的时长加成、饱食类三档 buff 会与服务器值不符；`takeOverSource=true` 时以服务器值为准，这本身就是"全服共享"想要的一致性。
-- **重复喝药（已处理）**：客户端刷新时长不会改变 buffType 列表，50 包不发、服务器无感。改由 `GetDataHandlers.PlayerSlot` 监控背包——某槽位原有物品恰好少 1 个且该物品 `buffType > 0`，即判定为喝药，用该物品自身的 `buffTime` 重置该玩家计时（`trigger` 只同步自己，`mirror` 全服一起刷新）。误判（如扔掉一瓶）的代价只是一次计时重置。
+- **重复喝药（已处理）**：客户端刷新时长不会改变 buffType 列表，50 包不发、服务器无感。改由 `GetDataHandlers.PlayerSlot` 监控背包——槽位物品恰好少 1 个、且该物品 `buffType > 0`、且玩家确实持有该 buff，即判定为喝药：同步计时并重新广播一轮（trigger / mirror 均生效，其他玩家该 buff 的时长随之重算）。“丢弃物品”的误判已被持有校验排除，持有中的误判只多刷一轮时长。
 - **兜底**：即便漏检，计时归零时若客户端仍持有该 buff（`buffType` 里还在），会自动重开一轮，不会提前误清。
 - **包量放大**：O(在线人数 × 新增 buff 数)，靠 `cooldownSeconds` 节流。
 - **buff 槽位**：目标玩家 buff 满 44 时，`AddBuff` 会挤掉最前面的非 debuff（Player.cs:5317-5351）。

@@ -38,7 +38,7 @@ namespace ShareBuff
         /// 进服补发（仅 trigger 模式）：玩家进服时，把全服仍在生效的共享 buff 按剩余时长补给他。
         /// mirror 模式本身就持续对齐并集，无需此开关。
         /// </summary>
-        public bool giveOnJoin = false;
+        public bool giveOnJoin = true;
 
         /// <summary>
         /// 逐条指定 buff 时长（秒），优先级最高，高于药水时长。
@@ -66,30 +66,75 @@ namespace ShareBuff
         /// <summary>不参与共享的玩家名</summary>
         public List<string> exclude = [];
 
+        /// <summary>调试日志：打印广播 / 回声 / 喝药 / 计时等决策细节到服务器日志，排查用</summary>
+        public bool debug = false;
+
         [JsonIgnore]
         public bool IsMirror => string.Equals(mode, "mirror", System.StringComparison.OrdinalIgnoreCase);
 
         public static Config Load(string path)
         {
             if (File.Exists(path))
+            {
                 return JsonConvert.DeserializeObject<Config>(File.ReadAllText(path)) ?? new Config();
+            }
 
-            // 首次生成：把 wiki 分类表的 Gain / Debuff 填进去作为白名单初值
-            var c = new Config();
-            c.gain = [.. BuffCats.Gain.OrderBy(x => x)];
-            c.debuff = [.. BuffCats.Debuff.OrderBy(x => x)];
+
             // TShock 禁用玩家 / 非法装备时会下发 Frozen(47) Webbed(69) Stoned(156)，
             // 默认拉黑，免得开了 shareDebuff 后“一个人被禁用、全服跟着被定身”
-            c.blacklist =
-            [
+            List<int> blacklist = [
                 21, // 耐药性
                 47, // 冰冻
                 68, // 窒息
                 147, // 旗帜
                 156, // 石化
                 199, // 创意震撼
-                396 // 魔力涌动
+                396, // 魔力涌动
+
+                321, // 控脑术
+                149, // 被网住
+                148, // 野性咬噬
+                194, // 强风
+                23, // 诅咒
+                353, // 微光闪烁
+                60, // 叶状水晶
+                306, // 钛金屏障
+
+                // 鞭子相关的buff，含debuff
+                307, // 皮鞭
+                308, // 迪朗达尔祝福
+                309, // 迪朗达尔
+                310, // 暗黑收割
+                311, // 收割时刻
+                312, // 一种不错的增益
+                313, // 鞭炮
+                314, // 丛林之怒
+                315, // 荆鞭
+                316, // 万花筒
+                319, // 晨星
+                326, // 脊柱骨鞭	
+                340, // 冷鞭
+                357, // 蛛网鞭
+                358, // 魂笞
+                359, // 脉管
+                360, // 星坠
+                361, // 花儿的粗暴展示
+                362, // 电鳗
+                363, // 星座
+                364, // 支配之鞭
+                367, // 花儿的粗暴展示
+                368, // 支配之鞭
+                369, // 星坠
             ];
+
+            var c = new Config
+            {
+                // 首次生成：把 wiki 分类表的 Gain / Debuff 填进去作为白名单初值
+                gain = [.. BuffCats.Gain.OrderBy(x => x)],
+                debuff = [.. BuffCats.Debuff.OrderBy(x => x)],
+
+                blacklist = blacklist
+            };
             File.WriteAllText(path, JsonConvert.SerializeObject(c, Formatting.Indented));
             return c;
         }
@@ -97,10 +142,8 @@ namespace ShareBuff
 
     public class BuffData
     {
-        /// <summary>buff id</summary>
         public int id = 0;
 
-        /// <summary>持续时长（秒）</summary>
         public int seconds = 60;
     }
 

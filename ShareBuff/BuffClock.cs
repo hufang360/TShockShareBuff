@@ -61,15 +61,6 @@ namespace ShareBuff
             }
         }
 
-        /// <summary>重载配置时重置，允许重新建表</summary>
-        public static void Reset()
-        {
-            _built = false;
-            _failed = false;
-            _buffTime.Clear();
-            _itemBuff.Clear();
-        }
-
         /// <summary>
         /// 时长优先级：配置指定的秒数 > 药水时长（Item.buffTime 建表）> 分类兜底秒数。
         /// 药水时长最贴近玩家实际体验，所以兜底之前优先用它。
@@ -96,7 +87,7 @@ namespace ShareBuff
 
         /// <summary>
         /// 反向索引：buffType -> 赋予它的物品清单（物品 id + 物品自带的名义时长 ticks）。
-        /// 供 /sbuff reference 生成参考文档用；建表失败返回空表。
+        /// 供 /sbuff docs 生成参考文档用；建表失败返回空表。
         /// </summary>
         public static Dictionary<int, List<(int itemId, int ticks)>> GetBuffSources()
         {

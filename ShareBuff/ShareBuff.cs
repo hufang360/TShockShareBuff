@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Text;
+using Newtonsoft.Json;
 using Terraria;
 using Terraria.ID;
 using TerrariaApi.Server;
@@ -26,28 +27,27 @@ namespace ShareBuff
         static Config _config;
 
         // 白名单（来自配置，Reload 时重建，避免 List.Contains 的线性查找）
-        static HashSet<int> _gainSet = new HashSet<int>();
-        static HashSet<int> _debuffSet = new HashSet<int>();
+        static HashSet<int> _gainSet = [];
+        static HashSet<int> _debuffSet = [];
 
         // 玩家 index -> buff id -> 剩余 tick（服务器自计时）
-        readonly Dictionary<int, Dictionary<int, int>> _timers = new Dictionary<int, Dictionary<int, int>>();
+        readonly Dictionary<int, Dictionary<int, int>> _timers = [];
 
         // 玩家 index -> 上一帧 buff 集合（用于 diff 出新增项）
-        readonly Dictionary<int, HashSet<int>> _snapshots = new Dictionary<int, HashSet<int>>();
+        readonly Dictionary<int, HashSet<int>> _snapshots = [];
 
         // buff id -> 上次广播时的 tick（防回环）
-        readonly Dictionary<int, long> _cooldown = new Dictionary<int, long>();
+        readonly Dictionary<int, long> _cooldown = [];
 
         // buff id -> 最近一次全服广播的 (起始 tick, 总时长)。
         // 持有者没有服务器计时（如 takeOverSource=false 时的触发者本人）时，用它反推剩余时长
-        readonly Dictionary<int, (long tick, int total)> _origin = new Dictionary<int, (long, int)>();
+        readonly Dictionary<int, (long tick, int total)> _origin = [];
 
         // 玩家 index -> 服务器已下发、尚未收到客户端回声的 buff（回声不算新增，不重播）
-        readonly Dictionary<int, HashSet<int>> _supplied = new Dictionary<int, HashSet<int>>();
+        readonly Dictionary<int, HashSet<int>> _supplied = [];
 
         // 玩家 index -> 背包槽位 -> (物品 id, 数量)（用于检测喝药）
-        readonly Dictionary<int, Dictionary<short, (short type, short stack)>> _inv =
-            new Dictionary<int, Dictionary<short, (short type, short stack)>>();
+        readonly Dictionary<int, Dictionary<short, (short type, short stack)>> _inv = [];
 
         long _tick;
 
@@ -302,12 +302,17 @@ namespace ShareBuff
             if (buffId <= 0 || ticks <= 0)
                 return;
 
+            // 非共享 buff 不记账：TickTimers 到期后“还持有就重开一轮”会无限空转，list 也全是噪音
+            if (!CanShare(buffId))
+                return;
+
             SetTimer(plr, buffId, ticks);
         }
 
         /// <summary>
         /// 重复喝药：客户端自己把 buff 刷回满时长，但 50 包只有 buffType、看不到刷新，
-        /// 服务器靠背包物品数量减少来感知，把计时同步回来。
+        /// 服务器靠背包物品数量减少来感知，把计时同步回来，并重新广播一轮
+        /// （trigger / mirror 均生效，其他玩家的该 buff 时长随之重算）。
         /// </summary>
         void OnPlayerSlot(object sender, GetDataHandlers.PlayerSlotEventArgs e)
         {
@@ -334,14 +339,21 @@ namespace ShareBuff
             if (buffType <= 0 || !CanShare(buffType))
                 return;
 
+            // 协议区分不了“喝药”和“丢弃了 1 个”：校验玩家确实持有该 buff，
+            // 排除“丢弃且从未喝过”的误判；持有时的误判代价只是多刷一轮时长
+            if (!HasBuff(e.Player, buffType))
+                return;
+
             int ticks = buffTime > 0 ? buffTime : DurationOf(buffType);
 
             // 客户端已自行刷新，服务器只需同步自己的计时
             SetTimer(e.Player.Index, buffType, ticks);
 
-            // 镜像模式下全服一起刷新
-            if (_config.IsMirror)
-                Apply(e.Player, buffType, ticks, false);
+            DebugLog($"{e.Player.Name} 使用物品 {old.type}，刷新 {BuffName(buffType)}({buffType}) {ticks / 60}s");
+
+            // 重复喝药 = 重新触发一轮共享：其他玩家的该 buff 时长也重算（无回环——
+            // 已持有者 buffType 不变不会上报；已过期的被重新加上，仅多一轮收敛广播）
+            Apply(e.Player, buffType, ticks, false);
         }
 
         void OnServerLeave(LeaveEventArgs args)
@@ -361,8 +373,8 @@ namespace ShareBuff
         void Reload()
         {
             _config = Config.Load(Path.Combine(SaveDir, "config.json"));
-            _gainSet = new HashSet<int>(_config.gain);
-            _debuffSet = new HashSet<int>(_config.debuff);
+            _gainSet = [.. _config.gain];
+            _debuffSet = [.. _config.debuff];
 
             // buffs 表建索引（重复 id 时先出现的生效，与旧的线性扫描一致）
             _cfgBuffSeconds = new Dictionary<int, int>();
@@ -371,8 +383,6 @@ namespace ShareBuff
                 if (d.id > 0 && !_cfgBuffSeconds.ContainsKey(d.id))
                     _cfgBuffSeconds[d.id] = d.seconds;
             }
-
-            BuffClock.Reset();
         }
 
         // buffs 配置表的 id -> seconds 索引，Reload 时重建
@@ -410,18 +420,26 @@ namespace ShareBuff
                 case "c":
                     ClearBuffs(args);
                     break;
-                case "reference":
-                case "ref":
+                case "clearplayer":
+                case "cp":
+                    ClearPlayerBuffs(args);
+                    break;
+                case "config":
+                    ConfigCmd(args);
+                    break;
+                case "docs":
                     GenerateReference(p);
                     break;
                 default:
-                    p.SendInfoMessage("用法：/sharebuff <on|off|reload|list|clear|reference>（可简写 /sbuff）");
-                    p.SendInfoMessage("  on        - 开启共享 buff");
-                    p.SendInfoMessage("  off       - 关闭共享 buff");
-                    p.SendInfoMessage("  reload    - 重载配置文件");
-                    p.SendInfoMessage("  list      - 查看正在管理的 buff");
-                    p.SendInfoMessage("  clear     - 清除玩家 buff");
-                    p.SendInfoMessage("  reference - 在配置目录生成 buff 时长参考文档（.md），可简写 ref");
+                    p.SendInfoMessage("/sharebuff 指令用法（可简写 /sbuff）：");
+                    p.SendInfoMessage("  on         - 开启共享 buff");
+                    p.SendInfoMessage("  off        - 关闭共享 buff");
+                    p.SendInfoMessage("  reload     - 重载配置文件");
+                    p.SendInfoMessage("  list       - 查看正在管理的 buff");
+                    p.SendInfoMessage("  clear      - 清除所有在线玩家的 buff");
+                    p.SendInfoMessage("  clearplayer- 清除指定玩家的 buff，可简写 cp");
+                    p.SendInfoMessage("  config     - 查看 / 修改配置项，改动验证通过后写回文件");
+                    p.SendInfoMessage("  docs       - 在配置目录生成 buff 时长参考文档（.md）");
                     break;
             }
         }
@@ -451,8 +469,7 @@ namespace ShareBuff
         }
 
         /// <summary>
-        /// /sbuff clear：清除在线玩家的 buff。协议没有移除包，统一发 55 + time=1 让其自然过期，
-        /// 快照 diff 只看新增项，不会因此触发重新广播。
+        /// /sbuff clear：清除所有在线玩家的 buff。见 ClearOne 的实现说明。
         /// </summary>
         void ClearBuffs(CommandArgs args)
         {
@@ -464,6 +481,7 @@ namespace ShareBuff
                 p.SendInfoMessage("用法：/sbuff clear <debuff|all|help>");
                 p.SendInfoMessage("  debuff - 清除所有在线玩家的减益");
                 p.SendInfoMessage("  all    - 清除所有在线玩家的全部 buff");
+                p.SendInfoMessage("指定单个玩家请用 /sbuff clearplayer");
                 return;
             }
 
@@ -481,27 +499,243 @@ namespace ShareBuff
                     continue;
 
                 players++;
+                cleared += ClearOne(plr, all);
+            }
+
+            // 全服已无人持有：广播起点记录一并清账，防反推出已死时长
+            foreach (int buffId in _origin.Keys.ToList())
+            {
+                if (all || IsDebuff(buffId))
+                    _origin.Remove(buffId);
+            }
+
+            DebugLog($"clear {(all ? "all" : "debuff")}：{players} 名玩家共 {cleared} 项");
+            p.SendSuccessMessage($"已为 {players} 名在线玩家清除 {(all ? "全部" : "减益")} buff，共 {cleared} 项");
+        }
+
+        /// <summary>
+        /// /sbuff clearplayer（cp）：/sbuff cp <玩家名> <debuff|all>，清除指定玩家的 buff
+        /// </summary>
+        void ClearPlayerBuffs(CommandArgs args)
+        {
+            TSPlayer p = args.Player;
+            if (args.Parameters.Count < 2 || args.Parameters[1].ToLower() == "help")
+            {
+                p.SendInfoMessage("用法：/sbuff clearplayer <玩家名> <debuff|all>（可简写 /sbuff cp）");
+                return;
+            }
+
+            // 最后一个参数是 debuff|all，中间的全部拼作玩家名（支持带空格的名字）
+            string what = args.Parameters[args.Parameters.Count - 1].ToLower();
+            if (what != "debuff" && what != "all")
+            {
+                p.SendErrorMessage($"无效参数：{what}。用法：/sbuff cp <玩家名> <debuff|all>");
+                return;
+            }
+
+            string name = string.Join(" ", args.Parameters.Skip(1).Take(args.Parameters.Count - 2));
+            if (name.Length == 0)
+            {
+                p.SendErrorMessage("缺少玩家名。用法：/sbuff cp <玩家名> <debuff|all>");
+                return;
+            }
+
+            List<TSPlayer> found = TSPlayer.FindByNameOrID(name);
+            if (found.Count == 0)
+            {
+                p.SendErrorMessage($"未找到玩家：{name}");
+                return;
+            }
+            if (found.Count > 1)
+            {
+                p.SendErrorMessage($"匹配到多个玩家：{string.Join(", ", found.Select(x => x.Name))}");
+                return;
+            }
+
+            TSPlayer target = found[0];
+            if (target.TPlayer == null)
+                return;
+
+            // 管理员点名清除不受 exclude / 进服状态限制
+            int cleared = ClearOne(target, what == "all");
+            DebugLog($"clearplayer {target.Name} {what}：{cleared} 项（by {p.Name}）");
+            p.SendSuccessMessage($"已为 {target.Name} 清除 {(what == "all" ? "全部" : "减益")} buff，共 {cleared} 项");
+        }
+
+        /// <summary>
+        /// 清除单个玩家的目标 buff：清服务器端数组 → 广播 50 包 → 55 恢复保留项时长 → 清账。
+        /// 不能用 55 包 time=1：客户端 AddBuff 对已有 buff 只延长不缩短，发了等于没发。
+        /// 50 包副作用：客户端会把列表内所有 buff 的 buffTime 硬写成 60（1 秒），
+        /// SSC 下保留的增益会立刻过期，所以清完要紧跟 55 包把保留项时长灌回去。
+        /// 返回清除的项数。
+        /// </summary>
+        int ClearOne(TSPlayer plr, bool all)
+        {
+            Player t = plr.TPlayer;
+            bool removed = false;
+            int cleared = 0;
+            for (int i = 0; i < Player.maxBuffs; i++)
+            {
+                int b = t.buffType[i];
+                if (b <= 0)
+                    continue;
+                if (!all && !IsDebuff(b))
+                    continue;
+
+                t.buffType[i] = 0;
+                t.buffTime[i] = 0;
+                removed = true;
+                cleared++;
+            }
+
+            if (removed)
+            {
+                // 广播给所有人（不是只发本人）：其他客户端要靠它刷新头顶 buff 图标。
+                TSPlayer.All.SendData(PacketTypes.PlayerBuff, "", plr.Index);
+
                 foreach (int buffId in CurrentBuffs(plr))
                 {
-                    if (!all && !IsDebuff(buffId))
-                        continue;
+                    if (BuffClock.NoDecrease(buffId))
+                        continue; // 恒持续类（装备/饰品续命）不递减，无需恢复
 
-                    plr.SetBuff(buffId, 1, true);
-                    cleared++;
-                }
+                    // 服务器计时 > 广播起点反推 > 分类兜底。宁可刷满也不能让 buff 消失
+                    int ticks = RemainingOf(buffId, GetTimer(plr.Index, buffId));
+                    if (ticks <= 0)
+                        ticks = DurationOf(buffId);
 
-                // SetBuff 触发的 55 包会被 OnSendData 记成 timer=1，NoDecrease 类（宠物等）永不递减，这里统一清账
-                if (_timers.TryGetValue(plr.Index, out Dictionary<int, int> map))
-                {
-                    foreach (int buffId in map.Keys.ToList())
-                    {
-                        if (all || IsDebuff(buffId))
-                            map.Remove(buffId);
-                    }
+                    // AddBuff 只延长不缩短，客户端实际剩余更长时无副作用
+                    plr.SetBuff(buffId, ticks, true);
                 }
             }
 
-            p.SendSuccessMessage($"已为 {players} 名在线玩家清除 {(all ? "全部" : "减益")} buff，共 {cleared} 项");
+            // 清账：计时器与未回声登记，残留会让后续同 buff 的新增被误判
+            if (_timers.TryGetValue(plr.Index, out Dictionary<int, int> map))
+            {
+                foreach (int buffId in map.Keys.ToList())
+                {
+                    if (all || IsDebuff(buffId))
+                        map.Remove(buffId);
+                }
+            }
+            if (_supplied.TryGetValue(plr.Index, out HashSet<int> supplied))
+            {
+                supplied.RemoveWhere(b => all || IsDebuff(b));
+            }
+
+            return cleared;
+        }
+
+        /// <summary>
+        /// /sbuff config：无参列出可配置项及当前值；/sbuff config <key> <value> 修改并验证，
+        /// 通过后更新内存并写回 config.json（列表类 gain/debuff/blacklist 请直接编辑文件后 reload）
+        /// </summary>
+        void ConfigCmd(CommandArgs args)
+        {
+            TSPlayer p = args.Player;
+            if (args.Parameters.Count < 3)
+            {
+                p.SendInfoMessage("用法：/sbuff config <key> <value>（验证通过后写回文件，无参查看当前值）");
+                p.SendInfoMessage($"  enabled = {_config.enabled}（true/false）");
+                p.SendInfoMessage($"  mode = {_config.mode}（trigger/mirror）");
+                p.SendInfoMessage($"  takeOverSource = {_config.takeOverSource}（true/false）");
+                p.SendInfoMessage($"  gainDefaultSeconds = {_config.gainDefaultSeconds}（1~86400）");
+                p.SendInfoMessage($"  debuffDefaultSeconds = {_config.debuffDefaultSeconds}（1~86400）");
+                p.SendInfoMessage($"  cooldownSeconds = {_config.cooldownSeconds}（0~3600）");
+                p.SendInfoMessage($"  shareDebuff = {_config.shareDebuff}（true/false）");
+                p.SendInfoMessage($"  detectPotionUse = {_config.detectPotionUse}（true/false）");
+                p.SendInfoMessage($"  giveOnJoin = {_config.giveOnJoin}（true/false，仅 trigger 模式）");
+                p.SendInfoMessage($"  debug = {_config.debug}（true/false，决策日志）");
+                return;
+            }
+
+            string key = args.Parameters[1].ToLower();
+            string val = args.Parameters[2];
+            if (!TrySetConfig(key, val, out string err))
+            {
+                p.SendErrorMessage($"设置失败：{err}");
+                return;
+            }
+
+            try
+            {
+                File.WriteAllText(ConfigPath, JsonConvert.SerializeObject(_config, Formatting.Indented));
+            }
+            catch (Exception ex)
+            {
+                TShock.Log.Error($"[ShareBuff] 写入配置文件失败：{ex}");
+                p.SendErrorMessage("写入配置文件失败，详见服务器日志（内存值已更新，重启后丢失）");
+                return;
+            }
+
+            DebugLog($"config {key} = {val}（by {p.Name}）");
+            p.SendSuccessMessage($"已设置 {key} = {val}，验证通过并写入配置文件");
+            if (key == "mode")
+                p.SendInfoMessage(val.Equals("mirror", StringComparison.OrdinalIgnoreCase)
+                    ? "已切换到镜像模式：全服 buff 将持续对齐到并集"
+                    : "已切换到触发式：各自独立倒计时");
+        }
+
+        static string ConfigPath => Path.Combine(SaveDir, "config.json");
+
+        /// <summary>验证并写入单个配置项。键名不分大小写；返回 false 时 err 带原因</summary>
+        bool TrySetConfig(string key, string val, out string err)
+        {
+            err = null;
+            switch (key)
+            {
+                case "enabled":
+                    if (!TryBool(val, out bool enabled)) { err = "enabled 需要 true/false"; return false; }
+                    _config.enabled = enabled;
+                    return true;
+                case "mode":
+                    if (!val.Equals("trigger", StringComparison.OrdinalIgnoreCase) &&
+                        !val.Equals("mirror", StringComparison.OrdinalIgnoreCase))
+                    { err = "mode 需要 trigger 或 mirror"; return false; }
+                    _config.mode = val.ToLower();
+                    return true;
+                case "takeoversource":
+                    if (!TryBool(val, out bool take)) { err = "takeOverSource 需要 true/false"; return false; }
+                    _config.takeOverSource = take;
+                    return true;
+                case "sharedebuff":
+                    if (!TryBool(val, out bool share)) { err = "shareDebuff 需要 true/false"; return false; }
+                    _config.shareDebuff = share;
+                    return true;
+                case "detectpotionuse":
+                    if (!TryBool(val, out bool detect)) { err = "detectPotionUse 需要 true/false"; return false; }
+                    _config.detectPotionUse = detect;
+                    return true;
+                case "giveonjoin":
+                    if (!TryBool(val, out bool give)) { err = "giveOnJoin 需要 true/false"; return false; }
+                    _config.giveOnJoin = give;
+                    return true;
+                case "debug":
+                    if (!TryBool(val, out bool dbg)) { err = "debug 需要 true/false"; return false; }
+                    _config.debug = dbg;
+                    return true;
+                case "gaindefaultseconds":
+                    if (!TryInt(val, 1, 86400, out int gs)) { err = "gainDefaultSeconds 需要 1~86400 的整数（秒）"; return false; }
+                    _config.gainDefaultSeconds = gs;
+                    return true;
+                case "debuffdefaultseconds":
+                    if (!TryInt(val, 1, 86400, out int ds)) { err = "debuffDefaultSeconds 需要 1~86400 的整数（秒）"; return false; }
+                    _config.debuffDefaultSeconds = ds;
+                    return true;
+                case "cooldownseconds":
+                    if (!TryInt(val, 0, 3600, out int cs)) { err = "cooldownSeconds 需要 0~3600 的整数（秒）"; return false; }
+                    _config.cooldownSeconds = cs;
+                    return true;
+                default:
+                    err = $"未知配置项：{key}（gain/debuff/blacklist/exclude 等列表请编辑配置文件后 /sbuff reload）";
+                    return false;
+            }
+        }
+
+        static bool TryBool(string s, out bool v) => bool.TryParse(s, out v);
+
+        static bool TryInt(string s, int min, int max, out int v)
+        {
+            return int.TryParse(s, out v) && v >= min && v <= max;
         }
 
         /// <summary>是否减益：debuff 白名单优先；未分类的 id 按非增益、非宠物/坐骑/矿车兜底</summary>
@@ -513,7 +747,7 @@ namespace ShareBuff
         }
 
         /// <summary>
-        /// /sbuff reference（ref）：在配置目录生成 buff 时长参考文档（.md）。
+        /// /sbuff docs：在配置目录生成 buff 时长参考文档（.md）。
         /// 覆盖范围：物品能赋予的 buff ∪ 配置白名单（gain/debuff）∪ 配置 buffs 时长覆盖。
         /// 数据来源：BuffClock 建表（全部物品的 buffType/buffTime）+ 当前配置黑名单 / 白名单 / 时长覆盖。
         /// </summary>
@@ -669,6 +903,12 @@ namespace ShareBuff
                     continue;
 
                 SetTimer(p.Index, buffId, ticks);
+
+                // 下发时未持有才登记回声：客户端收到后上报 50 包，ScanBuffs 据此不重播。
+                // 已持有者（如重复喝药刷新）buffType 不变不会上报，登记了反而误吞他之后真实的新增
+                if (!HasBuff(p, buffId))
+                    GetSupplied(p.Index).Add(buffId);
+
                 p.SetBuff(buffId, ticks, true);
             }
         }
@@ -751,6 +991,32 @@ namespace ShareBuff
             return set;
         }
 
+        /// <summary>玩家当前是否持有某 buff（直接扫数组，不分配集合）</summary>
+        static bool HasBuff(TSPlayer plr, int buffId)
+        {
+            int[] buffType = plr.TPlayer.buffType;
+            for (int i = 0; i < Player.maxBuffs; i++)
+            {
+                if (buffType[i] == buffId)
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>debug 开启时输出决策日志到服务器日志</summary>
+        void DebugLog(string msg)
+        {
+            if (_config.debug)
+                TShock.Log.Info("[ShareBuff] " + msg);
+        }
+
+        /// <summary>buff id 转名字，查不到给 ?</summary>
+        static string BuffName(int buffId)
+        {
+            string n = TShock.Utils.GetBuffName(buffId);
+            return string.IsNullOrEmpty(n) ? "?" : n;
+        }
+
         static void FillBuffs(TSPlayer plr, HashSet<int> set)
         {
             int[] buffType = plr.TPlayer.buffType;
@@ -768,7 +1034,9 @@ namespace ShareBuff
                 return false;
             if (plr.TPlayer == null)
                 return false;
-            if (plr.State < (int)ConnectionState.AwaitingPlayerInfo)
+            // 必须完全进服（State 10）：SSC 的 buff 恢复晚于 AwaitingPlayerInfo(3)，
+            // 太早记录首见快照会把进服自带 buff 全部 diff 成新增、触发全服广播
+            if (plr.State < 10)
                 return false;
             if (_config.exclude.Contains(plr.Name))
                 return false;
