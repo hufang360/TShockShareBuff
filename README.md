@@ -1,165 +1,98 @@
 # TShockShareBuff · Buff 全服共享
 
-## 1. 目标
+一瓶药水，全服生效：任意在线玩家获得 buff 时，自动下发给全服其他在线玩家。
 
-任意在线玩家获得 buff 时，自动下发给全服其他在线玩家（一瓶药水全服生效）。
+## 特性
 
-## 2. 技术前提（源码调研结论，1.4.5.7 / TShock pr-3301）
+- **两种共享模式**：触发式 `trigger`（各自独立倒计时）/ 镜像式 `mirror`（全服持续对齐并集）
+- **白名单制**：只共享配置在 `gain` / `debuff` 里的 buff，`blacklist` 一键排除
+- **宠物 / 坐骑 / 矿车代码层硬排除**，永远不参与共享
+- **服务器接管时长**：全服剩余时间天然一致，重复喝药也会自动同步刷新
+- **进服补发**：新玩家进服自动补上全服仍在生效的共享 buff（按剩余时长）
+- **在线改配置** `/sbuff config`、**生成时长参考文档** `/sbuff docs`
 
-**服务器能拿到什么**
+## 安装
 
-- 客户端 buff 变化时主动上报 `MessageID 50 (PlayerBuffs)`，携带的是**完整 buffType 列表**；`Main.cs:17884-17897` 逐帧比对本地与镜像，有变化才发，延迟约 1 帧。
-- TShock 在 `GetDataHandlers.HandlePlayerBuffList` 中接管该包，写入 `TPlayer.buffType[]` 后 `return true`（GetDataHandlers.cs:3877-3907）。所以 `TShock.Players[i].TPlayer.buffType` 就是服务器视角的最新 buff 集合。
-- `Player.maxBuffs = 44`（Player.cs:1491）。
+1. 把 `ShareBuff.dll` 放进 TShock 的 `ServerPlugins/` 目录
+2. 重启服务器，或 `/tshock reload` 热加载
+3. 首次启动自动生成配置 `tshock/ShareBuff/config.json`——白名单已预填全部增益 / 减益，**开箱即用**
 
-**剩余时间：协议里没有，但可以拿到（服务器自计时）**
+> 基于 1.4.5.7 / TShock pr-3301 开发。
 
-- 50 包确实不含时间——`NetMessage.cs:997-1010` 只写 buffType 列表；服务端收到后 `buffTime` 被硬编码成 60（`MessageBuffer.cs:2465`、`GetDataHandlers.cs:3938`）。OTAPI 也没有暴露 `Player.AddBuff` 钩子。
-- 但服务器侧 `buffTime[]` 是块**自留地**：原版只在 `whoAmI == Main.myPlayer` 时递减（`Player.cs:9958-9960`），服务端 `Main.myPlayer == 255`，**永远不会自动递减**，50 包也不会覆盖我们写的值。
-- 所以做法是**服务器接管时长**：检测到新增 buff → 补发一次 `55 + T` 把时长揽到自己手里 → 服务器每 tick 递减 remain。剩余时间精确到 tick，且全服天然一致。
-- 初始时长 `T` 的来源（按优先级）：
-  1. 配置表 `buffs[{id,seconds}]`
-  2. `Item.buffTime` 自动建表：`Initialize` 时遍历 `ItemID.Count`，`item.SetDefaults(i)` 后取 `buffType→max(buffTime)`（`Item.cs:279/281`），覆盖绝大多数药水/食物类 buff
-  3. `defaultSeconds`
+## 命令速查（别名 `/sbuff`）
 
-**下发方式**
+全部需要权限 `sharebuff.admin`。
 
-- `NetMessage.SendData(55, -1, -1, null, targetIndex, buffId, ticks)`。客户端 `case 55` 仅当 `number == myPlayer` 才 `AddBuff(type, time, fromNetPvP: true)`（绕过专家/难度时间修正），天然只作用于目标玩家。
-- 已持有该 buff 时走 `AddBuff_TryUpdatingExistingBuffTime`，取 `max(旧值, T)`（`Player.cs:5394-5418`）——补发只会延长、不会缩短，可利用这一点"接管"。
-- 等价写法 `TSPlayer.SetBuff(id, ticks, bypass: true)`；**必须 bypass**，否则会被 `LastThreat` 5 秒节流丢弃（TSPlayer.cs:2412-2418）。
-- 时间单位是 tick（1/60 秒），上限 `int.MaxValue/60 - 1`。
-- 移除 buff 没有专用包，且 `55 + time=1` 对已持有 buff 无效——客户端 `AddBuff` 只延长不缩短（见 5. 命令中 clear 的实现）。
+| 命令 | 说明 |
+|------|------|
+| `/sbuff on` / `off` | 运行时开关（不写回配置文件） |
+| `/sbuff reload` | 重载 `config.json`（`/tshock reload` 也会触发） |
+| `/sbuff list` | 列出全服当前在管的 buff 及剩余秒数，核对计时用 |
+| `/sbuff clear debuff` | 清除所有在线玩家的减益 |
+| `/sbuff clear all` | 清除所有在线玩家的全部 buff |
+| `/sbuff clearplayer <玩家名> <debuff\|all>` | 清除**指定**玩家的减益或全部 buff（简写 `/sbuff cp`，支持带空格的玩家名） |
+| `/sbuff config` | 查看全部配置项当前值；`/sbuff config <key> <value>` 在线修改，校验通过即写回文件 |
+| `/sbuff docs` | 生成 buff 时长参考文档 `buff_time_ref.md`（含物品→buff 时长、白名单、黑名单），查 id / 调时长时用 |
 
-**倒计时边界（原版规则，服务器需对齐）**
+## 配置（基础）
 
-- `BuffID.Sets.TimeLeftDoesNotDecrease`：宠物类 8 个 id（28/334/29/159/150/93/348/366，BuffID.cs:22）不递减，服务器也别减。
-- `BuffID.Sets.AddBuffTimeAdditivelyToCap`：94 号累加至 600 tick 上限（BuffID.cs:34），非取 max。
+### 1. 核心开关
 
-**回环风险**
+| 键 | 默认 | 说明 |
+|----|------|------|
+| `enabled` | `true` | 总开关 |
+| `mode` | `trigger` | `trigger` 触发式：某刻获得 buff 时全服各来一段配置时长，之后各自独立倒计时；`mirror` 镜像式：只要还有人持有就持续补齐，全服列表始终对齐 |
+| `shareDebuff` | `true` | 减益是否也全服共享（`debuff` 白名单生效的前提） |
+| `giveOnJoin` | `true` | 进服补发（仅 `trigger` 模式）：进服按剩余时长补上全服生效中的共享 buff |
+| `detectPotionUse` | `true` | 检测背包药水消耗感知"重复喝药"，自动刷新全服该 buff 时长 |
+| `takeOverSource` | `true` | 连触发者本人的 buff 时长也统一到服务器值；`false` 时不动触发者 |
+| `cooldownSeconds` | `5` | 同一 buff 的最小广播间隔（秒），防回环 |
+| `exclude` | `[]` | 不参与共享的玩家名列表 |
+| `debug` | `false` | 调试日志：输出广播 / 喝药 / 清账等决策细节到服务器日志 |
 
-被广播的玩家会带着新 buff 上报 50 包 → 必须防止它再触发一次广播。
+标量键可直接 `/sbuff config <key> <value>` 在线修改并写回文件；列表类（`gain` / `debuff` / `blacklist` / `exclude`）请编辑文件后 `/sbuff reload`。
 
-## 3. 功能需求
+### 2. 时长
 
-| # | 需求 | 说明 |
-|---|------|------|
-| FR1 | 检测新增 buff | `GameUpdate` 每 tick 遍历在线玩家 `TPlayer.buffType`，与快照 diff 取新增项（开销极小，无需轮询间隔） |
-| FR2 | 接管 + 广播 | 对新增且允许共享的 buff：先给**触发者本人**补发 `55 + T`（把时长揽到服务器手里），再给其他在线玩家下发 `55 + T` |
-| FR3 | 防回环 | 全局 buff 冷却表：同一 buffId 在 `cooldownSeconds` 内只广播一次 |
-| FR4 | 过滤 | **白名单制**：只有配置 `gain` 里的 id 才共享，`shareDebuff=true` 时 `debuff` 里的也共享。两道额外闸门：`blacklist`，以及宠物 / 坐骑 / 矿车的硬排除（代码层，服主清不掉） |
-| FR5 | 时长与计时 | 优先级：`buffs` 表指定 > 药水时长（`Item.buffTime`）> 分类兜底（增益 5 分钟 / 减益 30 秒）；服务器维护 `remainTicks` 倒计时表，每 tick 递减，跳过 `TimeLeftDoesNotDecrease` |
-| FR6 | 快照重置 | `ServerJoin` 时预填该玩家快照（避免进服自带 buff 触发全服）；`ServerLeave` / 死亡重生时清空该玩家受管项 |
-| FR7 | 热重载 | `GeneralHooks.ReloadEvent` + `/sharebuff reload` |
-| FR8 | 开关 | `/sharebuff on|off|reload`，权限 `sharebuff.admin` |
-| FR9 | 查询 | `/sharebuff list`：列出当前全服在管的 buff 及剩余时间，便于验证计时是否准确 |
+| 键 | 默认 | 说明 |
+|----|------|------|
+| `gainDefaultSeconds` | `300` | 增益兜底时长（秒） |
+| `debuffDefaultSeconds` | `30` | 减益兜底时长（秒） |
+| `buffs` | `[]` | 逐条指定时长，优先级最高：`{ "id": 5, "seconds": 600 }` |
 
-### 两种共享模式（`mode` 可配）
+实际时长按此优先级取值：**`buffs` 表指定 → 药水原本时长（`Item.buffTime` 自动建表）→ 分类兜底**。想固定某个 buff 的时长就在 `buffs` 里加一条，单位都是秒。
 
-- **`trigger` 触发式**：某人获得 buff 的那一刻，全服其他人各自获得一段配置时长，之后各自独立倒计时、互不影响。靠 `cooldownSeconds` 防回环。
-- **`mirror` 镜像式**：全服 buff 列表始终对齐到并集——只要还有一人持有某 buff，全服缺失的人会被持续补发；所有人都失效后才撤销（撤销靠发 `55 + time=1`，有 1~2 秒延迟）。此模式下 `cooldownSeconds` 退化为补发节流间隔。
+> 恒持续类 buff（28 狼人 / 29 灵视 / 93 弹药箱等）照常共享，只是服务器不递减其计时（永久生效）——"是否共享"与"是否递减"是两件事。
 
-## 3.1 buff 分类与白名单
+## 名单管理
 
-分类数据来源：`tr-wiki/buff_categories.md` 第六节的 C# 数组定义，共 400 条、彼此无交集。首次启动时会把 Gain / Debuff 写进配置文件作为**白名单初值**，之后由服主自由增删。
-
-| 类别 | 条数 | 落到配置 |
-|------|------|----------|
-| 增益 Gain | 105 | → `gain`（白名单，默认生效） |
-| 减益 Debuff | 87 | → `debuff`（`shareDebuff=true` 时才生效） |
-| 宠物 Pet | 120 | 硬排除，不进配置 |
-| 坐骑 Mount | 34 | 硬排除，不进配置 |
-| 矿车 Minecart | 54 | 硬排除，不进配置 |
-
-判断顺序：`blacklist` → 宠物/坐骑/矿车硬排除 → `gain` → (`shareDebuff` ? `debuff` : 不共享)。不在白名单里的一律不共享。
-
-宠物 / 坐骑 / 矿车是代码层硬排除（`BuffCats.Excluded`），即使被误加进 `gain` 也不会共享。
-
-**注意**：增益表里含 28（狼人）、29（灵视）、93（弹药箱）、366 等 `TimeLeftDoesNotDecrease` 的 buff——它们照常共享，只是服务器不递减其计时（永久生效）。所以"是否共享"与"是否递减"是两件事。
-
-## 4. 配置 `tshock/ShareBuff/config.json`
-
-```json
-{
-  "enabled": true,
-  "mode": "trigger",
-  "takeOverSource": true,
-  "gainDefaultSeconds": 300,
-  "debuffDefaultSeconds": 30,
-  "cooldownSeconds": 5,
-  "shareDebuff": false,
-  "detectPotionUse": true,
-  "giveOnJoin": true,
-  "debug": false,
-  "buffs": [ { "id": 5, "seconds": 600 } ],
-  "gain": [1, 2, 3, ... ],
-  "debuff": [20, 21, 22, ... ],
-  "blacklist": [],
-  "exclude": []
-}
-```
-
-- `mode`：`trigger` | `mirror`
-- `takeOverSource`：`true` 时连触发者本人的 buff 时长也统一到服务器值（保证全服完全一致）；`false` 时不动触发者
-- `shareDebuff`：`true` 时减益也全服共享（默认 `false`）
-- `detectPotionUse`：检测背包药水消耗以感知"重复喝药"，同步服务器计时并重新广播一轮——其他玩家该 buff 的时长随之重算（已过期的重新获得）。关闭后退化为靠计时归零自动重开一轮
-- `giveOnJoin`：进服补发（仅 `trigger` 模式，默认 `true`）。玩家进服时把全服仍在生效的共享 buff 按**剩余时长**补给他；`mirror` 模式本身持续对齐并集，无需开启
-- `debug`：调试日志（默认 `false`）。输出广播 / 喝药 / 清账等决策细节到服务器日志，排查用
-- `blacklist`：额外的永不共享 id。宠物 / 坐骑 / 矿车已由 `BuffCats` 硬排除，无需在此列出
-- `gain` / `debuff`：白名单，只有列在里面的 id 才共享
-
-### 时长取值优先级
-
-1. **`buffs` 表里指定的 `seconds`** —— 想给某个 buff 固定时长就加一条，优先级最高
-2. **药水时长（`Item.buffTime`）** —— 自动建表，最贴近玩家实际喝药体验，所以优先于兜底值
-3. **分类兜底** —— 增益用 `gainDefaultSeconds`（默认 300 秒 / 5 分钟），减益用 `debuffDefaultSeconds`（默认 30 秒）
-
-三个值单位都是**秒**；`Item.buffTime` 建表拿到的是 tick（1/60 秒），内部自动换算，无需配置。
-改完配置执行 `/sharebuff reload` 生效。
-
-### 剩余时长反推（补发场景）
-
-进服补发 / 镜像补发用的是**剩余时长**而不是全时长，来源优先级：
-
-1. **持有者的服务器计时**（`_timers`）——正常广播路径下每 tick 递减，天然就是剩余值
-2. **广播起点折算**（`_origin`：最近一次广播的起始 tick + 总时长）——覆盖持有者没有计时的场景（如 `takeOverSource=false` 时的触发者本人）：剩余 = 总时长 −（当前 tick − 广播 tick）
-3. 以上都取不到才退化为 `DurationOf` 全时长
-
-同时所有服务器下发的补发（`giveOnJoin` / `mirror` 补齐）都会登记 `_supplied`，客户端回的 50 包被识别为回声、不再当"新增"重播——否则那一轮重播会把全服（含触发者本人）的 buff 刷回全时长。
-
-## 5. 命令
-
-| 命令 | 权限 | 说明 |
-|------|------|------|
-| `/sharebuff on` / `off` | `sharebuff.admin` | 运行时开关（不写回配置文件） |
-| `/sharebuff reload` | `sharebuff.admin` | 重载 `config.json` |
-| `/sharebuff list` | `sharebuff.admin` | 列出每个玩家当前在管的 buff 及服务器计时的剩余秒数，用于核对计时是否准确 |
-| `/sharebuff clear debuff` | `sharebuff.admin` | 清除所有在线玩家的减益 |
-| `/sharebuff clear all` | `sharebuff.admin` | 清除所有在线玩家的全部 buff |
-| `/sharebuff clear help` | `sharebuff.admin` | 查看 clear 用法（`/sharebuff clear` 无参同效） |
-| `/sharebuff clearplayer <玩家名> <debuff\|all>` | `sharebuff.admin` | 清除指定玩家的减益或全部 buff（简写 `/sbuff cp`，支持带空格的玩家名） |
-| `/sharebuff config` | `sharebuff.admin` | 查看 / 修改配置项，校验通过后写回 `config.json` |
-| `/sharebuff docs` | `sharebuff.admin` | 在配置目录生成 buff 时长参考文档（.md） |
-
-别名：`/sbuff`
-
-`clear` 的实现：直接清服务器端 `buffType`/`buffTime` 数组，再广播 50 包（PlayerBuff）让客户端覆盖该玩家的 buff 列表。两个协议坑：① `55 + time=1` 无效——客户端 `AddBuff` 对已有 buff 只延长不缩短；② 50 包副作用——客户端会把列表内所有 buff 的 `buffTime` 硬写成 60（1 秒），SSC 下保留的增益会立刻过期，所以清完紧跟 55 包把保留项时长灌回去（时长取服务器计时，反推不到时用分类时长兜底）。debuff 的判定为 `debuff` 白名单优先，未分类 id 按"非增益且非宠物/坐骑/矿车"兜底。
-
-## 6. 实现结构
+共享与否完全由三张名单决定，判断顺序：
 
 ```
-ShareBuff/
-  ShareBuff.cs   插件主体：hook 注册、GameUpdate 调度、接管与广播
-  Config.cs      配置模型 + JSON 读写（参考 TShockGoodLucky/Config.cs）
-  BuffClock.cs   时长来源表（Item.buffTime 建表 + 配置覆盖）+ tick 换算
-  BuffCats.cs    buff 分类表（增益/减益/宠物/坐骑/矿车），由 wiki 文档生成
+blacklist（黑名单）→ 宠物/坐骑/矿车（代码硬排除）→ gain（增益白名单）→ debuff（减益白名单，需 shareDebuff=true）
 ```
 
-## 7. 风险与对策
+不在任何白名单里的 id 一律不共享。
 
-- **时长取值的误差场景**：`Item.buffTime` 建表拿到的是"名义时长"。重叠喝药、专家/大师难度对 debuff 的时长加成、饱食类三档 buff 会与服务器值不符；`takeOverSource=true` 时以服务器值为准，这本身就是"全服共享"想要的一致性。
-- **重复喝药（已处理）**：客户端刷新时长不会改变 buffType 列表，50 包不发、服务器无感。改由 `GetDataHandlers.PlayerSlot` 监控背包——槽位物品恰好少 1 个、且该物品 `buffType > 0`、且玩家确实持有该 buff，即判定为喝药：同步计时并重新广播一轮（trigger / mirror 均生效，其他玩家该 buff 的时长随之重算）。“丢弃物品”的误判已被持有校验排除，持有中的误判只多刷一轮时长。
-- **兜底**：即便漏检，计时归零时若客户端仍持有该 buff（`buffType` 里还在），会自动重开一轮，不会提前误清。
-- **包量放大**：O(在线人数 × 新增 buff 数)，靠 `cooldownSeconds` 节流。
-- **buff 槽位**：目标玩家 buff 满 44 时，`AddBuff` 会挤掉最前面的非 debuff（Player.cs:5317-5351）。
-- **宠物/坐骑类 buff 互斥**：`AddBuff` 内部会移除同类旧 buff，属于原版行为，不额外处理。
-- **SSC**：角色数据未加载完成时跳过，避免污染。
+### 默认名单（首次启动自动写入）
+
+| 名单 | 默认内容 |
+|------|----------|
+| `gain` | **全部增益 105 条**（共享） |
+| `debuff` | **全部减益 87 条**（`shareDebuff=true` 时共享） |
+| `blacklist` | 禁用类 15 条 + 鞭子类 24 条（307~369 段）：冰冻、石化、耐药性、窒息、旗帜、创意震撼、魔力涌动、控脑术、被网住、野性咬噬、强风、诅咒、微光闪烁、叶状水晶、钛金屏障，及全部鞭子 buff |
+| 硬排除 | 宠物 120 / 坐骑 34 / 矿车 54，代码层排除，加进 `gain` 也不会共享 |
+
+### 怎么调
+
+- **不想共享某个增益**：从 `gain` 里删掉，或加进 `blacklist`（二选一即可；模板推荐黑名单，方便一眼看清排除了什么）
+- **想共享某个不在白名单的 buff**：把 id 加进 `gain`（或 `debuff`）
+- **id 从哪查**：`/sbuff docs` 生成的 `buff_time_ref.md` 有完整物品→buff 对照，或查 terraria.wiki.gg 增益 ID
+- 改完执行 `/sbuff reload` 生效（`/sbuff config` 只能改标量键）
+
+> 提示：开着 `shareDebuff` 时，被禁用 / 穿非法装备的玩家会触发 冰冻、石化 等控制类减益并传染全服——这类已经默认拉黑，服主对玩家下手也放心。
+
+## 更多
+
+- 技术细节（协议机制、实现结构、风险与对策）：[docs/technical.md](docs/technical.md)
+- 更新日志：[changelog.md](changelog.md)
