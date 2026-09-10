@@ -536,13 +536,20 @@ namespace ShareBuff
                 if (plr == null || kv.Value.Count == 0)
                     continue;
 
-                string desc = string.Join(", ", kv.Value
+                var buffs = kv.Value
                     .Where(x => x.Value > 0)
                     .OrderBy(x => x.Key)
-                    .Select(x => $"{TShock.Utils.GetBuffName(x.Key)}({x.Key}) 剩 {x.Value / 60}s"));
+                    .ToList();
+                if (buffs.Count == 0)
+                    continue;
 
-                if (desc.Length > 0)
-                    lines.Add($"{plr.Name}：{desc}");
+                // 每个玩家一块：名字一行，下面每行最多 5 个（名字过长的独占一行）
+                lines.Add($"{plr.Name}（{buffs.Count} 个）：");
+                lines.AddRange(FormatBuffGrid(buffs.Select(x =>
+                {
+                    string n = TShock.Utils.GetBuffName(x.Key);
+                    return ($"{n}({x.Key}) 剩 {x.Value / 60}s", DisplayWidth(n));
+                }), maxWidth: 100));
             }
 
             if (lines.Count == 0)
@@ -784,18 +791,20 @@ namespace ShareBuff
                             return;
                         }
 
-                        var lines = _config.blacklist
-                            .OrderBy(x => x)
-                            .Select(id => $"{BuffName(id)}({id})")
-                            .ToList();
+                        var lines = FormatBuffGrid(_config.blacklist
+                            .Select(id =>
+                            {
+                                string name = BuffName(id);
+                                return ($"{name}({id})", DisplayWidth(name));
+                            }));
 
                         if (!PaginationTools.TryParsePageNumber(args.Parameters, 2, p, out int pageNumber))
                             return;
 
                         PaginationTools.SendPage(p, pageNumber, lines, new PaginationTools.Settings
                         {
-                            HeaderFormat = $"[c/96FF0A:/sbuff blacklist]（共 {lines.Count} 条）({{0}}/{{1}})：",
-                            FooterFormat = "输入[c/96FF0A:/sbuff blacklist list {{0}}]查看更多".SFormat(Commands.Specifier),
+                            HeaderFormat = $"[c/96FF0A:/sbuff blacklist]（共 {_config.blacklist.Count} 条）({{0}}/{{1}})：",
+                            FooterFormat = "输入[c/96FF0A:/sbuff bl list {{0}}]查看更多".SFormat(Commands.Specifier),
                             MaxLinesPerPage = 15,
                         });
                         return;
@@ -1234,6 +1243,81 @@ namespace ShareBuff
         {
             if (_config.debug)
                 TShock.Log.Info("[ShareBuff] " + msg);
+        }
+
+        /// <summary>
+        /// 列表紧凑排版：每行最多 perLine 条；名字宽度 ≥ soloWidth 的条目独占一行；
+        /// 整行显示宽度超过 maxWidth 时也提前换行。中文按 2 个显示宽度计，贴近游戏内实际占位。
+        /// 条目为 (显示文本, 名字宽度)：名字宽度不含「 剩 Ns」之类的附加信息，
+        /// 这样 /sbuff list 里真正的长名字才能被识别出来。
+        /// </summary>
+        static List<string> FormatBuffGrid(IEnumerable<(string Text, int NameWidth)> entries, int perLine = 5, int maxWidth = 68, int soloWidth = 14)
+        {
+            var lines = new List<string>();
+            var sb = new StringBuilder();
+            int count = 0;   // 本行已有条数
+            int width = 0;   // 本行显示宽度
+
+            foreach ((string e, int nameWidth) in entries)
+            {
+                int w = DisplayWidth(e);
+
+                if (nameWidth >= soloWidth) // 名字太长：独占一行
+                {
+                    if (count > 0)
+                    {
+                        lines.Add(sb.ToString());
+                        sb.Clear();
+                        count = 0;
+                        width = 0;
+                    }
+                    lines.Add(e);
+                    continue;
+                }
+
+                if (count > 0 && (count >= perLine || width + 2 + w > maxWidth))
+                {
+                    lines.Add(sb.ToString());
+                    sb.Clear();
+                    count = 0;
+                    width = 0;
+                }
+
+                if (count > 0)
+                {
+                    sb.Append("  ");
+                    width += 2;
+                }
+                sb.Append(e);
+                width += w;
+                count++;
+            }
+
+            if (count > 0)
+                lines.Add(sb.ToString());
+
+            return lines;
+        }
+
+        /// <summary>字符串显示宽度：CJK / 全角字符按 2 计，其余按 1 计</summary>
+        static int DisplayWidth(string s)
+        {
+            int w = 0;
+            foreach (char c in s)
+                w += IsWide(c) ? 2 : 1;
+            return w;
+        }
+
+        /// <summary>是否全角 / CJK 字符（汉字、假名、全角标点与字母数字等）</summary>
+        static bool IsWide(char c)
+        {
+            return (c >= 0x1100 && c <= 0x115F)
+                || (c >= 0x2E80 && c <= 0xA4CF)
+                || (c >= 0xAC00 && c <= 0xD7A3)
+                || (c >= 0xF900 && c <= 0xFAFF)
+                || (c >= 0xFE30 && c <= 0xFE6F)
+                || (c >= 0xFF00 && c <= 0xFF60)
+                || (c >= 0xFFE0 && c <= 0xFFE6);
         }
 
         /// <summary>buff id 转名字，查不到给 ?</summary>

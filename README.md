@@ -29,12 +29,12 @@ Buff 全服共享，任意在线玩家获得 buff 时，自动下发给全服其
 |------|------|
 | `/sbuff on` / `off` | 运行时开关（不写回配置文件） |
 | `/sbuff reload` | 重载 `config.json`（`/tshock reload` 也会触发） |
-| `/sbuff list` | 列出全服当前在管的 buff 及剩余秒数，核对计时用 |
+| `/sbuff list` | 列出全服当前在管的 buff 及剩余秒数，核对计时用（每行 5 个，名字长的独占一行） |
 | `/sbuff clear debuff` | 清除所有在线玩家的减益 |
 | `/sbuff clear all` | 清除所有在线玩家的全部 buff |
 | `/sbuff clearplayer <玩家名> <debuff\|all>` | 清除**指定**玩家的减益或全部 buff（简写 `/sbuff cp`，支持带空格的玩家名） |
 | `/sbuff config` | 查看全部配置项当前值；`/sbuff config <key> <value>` 在线修改，校验通过即写回文件 |
-| `/sbuff blacklist list [页码]` | 查看黑名单（带 buff 名称与 id，分页显示，简写 `/sbuff bl`） |
+| `/sbuff blacklist list [页码]` | 查看黑名单（带 buff 名称与 id，每行 5 条、名字长的独占一行，分页显示，简写 `/sbuff bl`） |
 | `/sbuff blacklist add <id>` | 加入单个 buff id 到黑名单，即刻生效并写回文件 |
 | `/sbuff blacklist del <id>` | 移出单个 buff id（简写 `rm` / `d`） |
 | `/sbuff docs` | 生成 buff 时长参考文档 `buff_time_ref.md`（含物品→buff 时长、白名单、黑名单），查 id / 调时长时用 |
