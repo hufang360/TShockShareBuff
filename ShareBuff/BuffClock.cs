@@ -109,10 +109,70 @@ namespace ShareBuff
             return map;
         }
 
+        #region 红药水（ItemID 678）
+
+        // 红药水的 buffType 为 0，客户端在 Player.ItemCheck 里特判一次性加一组 buff，
+        // 物品表查不到时长，只能按客户端逻辑内置（含 buffId 硬编码）：
+        // - 普通世界：11 个减益各 216000 ticks（3600s）；其中除窒息(68)外的 10 个，
+        //   客户端 AddBuff 会按难度放大（专家 ×2 / 大师 ×2.5）
+        // - FTW(getGoodWorld) 世界（含 zenith）：18 选 3 随机增益，各 108000 ticks（1800s）
+        //   ——这批增益全都能由其他药水获得（如铁皮/迅捷/再生药水），但时长远短于红药水
+        static readonly int[] RedDebuffs = [20, 22, 23, 24, 30, 31, 32, 33, 35, 36, 68];
+
+        static readonly HashSet<int> RedGoodPool =
+        [
+            1, 2, 3, 5, 6, 7, 8, 9, 16, 17,
+            104, 105, 111, 113, 114, 115, 116, 117,
+        ];
+
+        /// <summary>
+        /// 该 buff 若来自红药水时的时长（ticks），已按难度放大——服务端发 55 包后
+        /// 客户端走 AddBuff(fromNetPvP:true) 不会再放大，这里直接给终值。
+        /// buffId 不在红药水的 buff 表内返回 0。
+        /// </summary>
+        public static int RedPotionTicks(int buffId)
+        {
+            if (Main.getGoodWorld)
+                return RedGoodPool.Contains(buffId) ? 108000 : 0;
+
+            if (Array.IndexOf(RedDebuffs, buffId) < 0)
+                return 0;
+
+            if (buffId == 68) // 窒息不在客户端的难度放大集合内
+                return 216000;
+
+            float mult = Main.masterMode ? 2.5f : Main.expertMode ? 2f : 1f;
+            return (int)(216000f * mult);
+        }
+
+        #endregion
+
+        /// <summary>
+        /// 该 buff 是否属于「炼金强化」(366) 的 1.2 倍延长集（1-18、104-117、121-124、257、343）。
+        /// 客户端持有 366（tile 699 炼金台互动获得 1800s）时喝下经典药水，会把时长 ×1.2 再入账；
+        /// 服务端发 55 包是终值（fromNetPvP:true 不二次修正），所以源头喝药检测到 366 时必须给放大后的时长。
+        /// </summary>
+        public static bool IsExtendedByPotionStation(int buffId)
+        {
+            if (buffId <= 0 || buffId >= BuffID.Count)
+                return false;
+            bool[] set = BuffID.Sets.BuffTimeIsExtendedByDeadCellsPotionStationBuff;
+            return set != null && set[buffId];
+        }
+
         /// <summary>该 buff 的时间不递减（宠物类），服务器也不该递减它</summary>
         public static bool NoDecrease(int buffId)
         {
             return buffId > 0 && buffId < BuffID.Count && BuffID.Sets.TimeLeftDoesNotDecrease[buffId];
+        }
+
+        /// <summary>炼金强化 1.2 倍放大后的时长（ticks 已按 6/5 放大，防溢出用 long 算）</summary>
+        public static int ScaleByPotionStation(int ticks)
+        {
+            if (ticks <= 0)
+                return ticks;
+            long scaled = (long)ticks * 6L / 5L;
+            return scaled > TickLimit ? TickLimit : (int)scaled;
         }
 
         public static int SecondsToTicks(int seconds)

@@ -1,6 +1,6 @@
 # TShockShareBuff · Buff 全服共享
 
-一瓶药水，全服生效：任意在线玩家获得 buff 时，自动下发给全服其他在线玩家。
+Buff 全服共享，任意在线玩家获得 buff 时，自动下发给全服其他在线玩家。
 
 ## 特性
 
@@ -8,8 +8,10 @@
 - **白名单制**：只共享配置在 `gain` / `debuff` 里的 buff，`blacklist` 一键排除
 - **宠物 / 坐骑 / 矿车代码层硬排除**，永远不参与共享
 - **服务器接管时长**：全服剩余时间天然一致，重复喝药也会自动同步刷新
-- **进服补发**：新玩家进服自动补上全服仍在生效的共享 buff（按剩余时长）
-- **在线改配置** `/sbuff config`、**生成时长参考文档** `/sbuff docs`
+- **红药水特判**：普通世界 11 个减益（3600s）/ FTW 世界 18 选 3 随机增益（1800s），表内 buff 即使能由其他药水获得，共享时长也一律按红药水实际给予的算（含专家 ×2 / 大师 ×2.5 难度放大）
+- **进服补发**：新玩家进服自动补上全服仍在生效的共享 buff（按剩余时长）（可配置关闭）
+- **在线改配置** `/sbuff config`
+- **生成时长参考文档** `/sbuff docs`
 
 ## 安装
 
@@ -32,6 +34,9 @@
 | `/sbuff clear all` | 清除所有在线玩家的全部 buff |
 | `/sbuff clearplayer <玩家名> <debuff\|all>` | 清除**指定**玩家的减益或全部 buff（简写 `/sbuff cp`，支持带空格的玩家名） |
 | `/sbuff config` | 查看全部配置项当前值；`/sbuff config <key> <value>` 在线修改，校验通过即写回文件 |
+| `/sbuff blacklist list [页码]` | 查看黑名单（带 buff 名称与 id，分页显示，简写 `/sbuff bl`） |
+| `/sbuff blacklist add <id>` | 加入单个 buff id 到黑名单，即刻生效并写回文件 |
+| `/sbuff blacklist del <id>` | 移出单个 buff id（简写 `rm` / `d`） |
 | `/sbuff docs` | 生成 buff 时长参考文档 `buff_time_ref.md`（含物品→buff 时长、白名单、黑名单），查 id / 调时长时用 |
 
 ## 配置（基础）
@@ -50,7 +55,7 @@
 | `exclude` | `[]` | 不参与共享的玩家名列表 |
 | `debug` | `false` | 调试日志：输出广播 / 喝药 / 清账等决策细节到服务器日志 |
 
-标量键可直接 `/sbuff config <key> <value>` 在线修改并写回文件；列表类（`gain` / `debuff` / `blacklist` / `exclude`）请编辑文件后 `/sbuff reload`。
+标量键可直接 `/sbuff config <key> <value>` 在线修改并写回文件；`blacklist` 可用 `/sbuff blacklist add/del` 在线增删；`gain` / `debuff` / `exclude` 请编辑文件后 `/sbuff reload`。
 
 ### 2. 时长
 
@@ -61,6 +66,10 @@
 | `buffs` | `[]` | 逐条指定时长，优先级最高：`{ "id": 5, "seconds": 600 }` |
 
 实际时长按此优先级取值：**`buffs` 表指定 → 药水原本时长（`Item.buffTime` 自动建表）→ 分类兜底**。想固定某个 buff 的时长就在 `buffs` 里加一条，单位都是秒。
+
+> 例外：红药水（678）给 buff 不走 `Item.buffTime`（客户端特判），喝下后 3 秒内新增的表内 buff，共享时长以红药水实际给予的为准，高于 `buffs` 表。
+
+> 例外 2：源头持有「炼金强化」(366)（点 tile 699 炼金台互动获得 1800s）时喝经典药水，客户端实际时长是 `Item.buffTime × 1.2`（1-18、104-117、121-124、257、343），共享按该终值计，与其他玩家是否持 366 无关。
 
 > 恒持续类 buff（28 狼人 / 29 灵视 / 93 弹药箱等）照常共享，只是服务器不递减其计时（永久生效）——"是否共享"与"是否递减"是两件事。
 
@@ -87,8 +96,9 @@ blacklist（黑名单）→ 宠物/坐骑/矿车（代码硬排除）→ gain（
 
 - **不想共享某个增益**：从 `gain` 里删掉，或加进 `blacklist`（二选一即可；模板推荐黑名单，方便一眼看清排除了什么）
 - **想共享某个不在白名单的 buff**：把 id 加进 `gain`（或 `debuff`）
+- **在线拉黑 / 解黑**：`/sbuff blacklist add <id>` / `del <id>`，即刻生效并写回文件
 - **id 从哪查**：`/sbuff docs` 生成的 `buff_time_ref.md` 有完整物品→buff 对照，或查 terraria.wiki.gg 增益 ID
-- 改完执行 `/sbuff reload` 生效（`/sbuff config` 只能改标量键）
+- 改完执行 `/sbuff reload` 生效（`gain` / `debuff` / `exclude` 等文件型列表）
 
 > 提示：开着 `shareDebuff` 时，被禁用 / 穿非法装备的玩家会触发 冰冻、石化 等控制类减益并传染全服——这类已经默认拉黑，服主对玩家下手也放心。
 

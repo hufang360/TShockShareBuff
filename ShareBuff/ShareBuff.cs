@@ -49,6 +49,14 @@ namespace ShareBuff
         // 玩家 index -> 背包槽位 -> (物品 id, 数量)（用于检测喝药）
         readonly Dictionary<int, Dictionary<short, (short type, short stack)>> _inv = [];
 
+        // 玩家 index -> 喝下红药水的 tick。窗口内该玩家 diff 出的新 buff 若在红药水表内，
+        // 共享时长以红药水为准（客户端特判加 buff，物品表查不到时长）
+        readonly Dictionary<int, long> _redPotionAt = [];
+
+        // 红药水判定窗口（tick）：客户端喝药后 5/50 包同帧成对发出且 TCP 保序（5 在前），
+        // 窗口只兜网络抖动与处理乱序，取 3 秒
+        const int RedPotionWindow = 180;
+
         long _tick;
 
         public Plugin(Main game) : base(game)
@@ -112,6 +120,7 @@ namespace ShareBuff
                     if (IsValid(plrObj) && CurrentBuffs(plrObj).Contains(buffId))
                     {
                         // 客户端还挂着：说明服务器估短了，或玩家重复喝药刷新过。重开一轮。
+                        DebugLog($"{plrObj.Name} 的 {BuffName(buffId)}({buffId}) 到期仍持有，重开一轮 {DurationOf(buffId) / 60}s");
                         map[buffId] = DurationOf(buffId);
                     }
                     else
@@ -141,6 +150,24 @@ namespace ShareBuff
                     FillBuffs(plr, first);
                     _snapshots[idx] = first;
 
+                    // 建立喝药检测的背包基线（关键）：进服时客户端回传的整包槽位更新
+                    // 发生在 State<10，被 IsValid 拦截、_inv 根本没建起来——
+                    // 后果是进服后第一次吃/喝会被当作“无旧记录”漏检，共享时长退化成
+                    // BuffClock 的最大值兜底（如棉花糖 60s 被当成 1500s）。
+                    // State 10 时服务器端 Player.inventory 已是权威值（SSC 恢复 / vanilla 已应用客户端回执），
+                    // 网络槽位 0~57 与 Player.inventory 下标恒等（见 PlayerItemSlotID.Inventory0 分配），直接快照。
+                    var inv = GetInv(idx);
+                    Item[] tInv = plr.TPlayer.inventory;
+                    int slots = Math.Min(58, tInv?.Length ?? 0);
+                    for (int s = 0; s < slots; s++)
+                    {
+                        Item it = tInv[s];
+                        if (it == null || it.type <= 0 || it.stack <= 0)
+                            continue;
+                        inv[(short)s] = ((short)it.type, (short)it.stack);
+                    }
+                    DebugLog($"{plr.Name} 进入跟踪，背包基线 {inv.Count} 槽，自带 {first.Count} 个 buff");
+
                     // trigger 模式的进服补发；mirror 模式由 SyncMirror 持续对齐，无需处理
                     if (_config.giveOnJoin && !_config.IsMirror)
                         GiveOnJoin(plr);
@@ -157,7 +184,10 @@ namespace ShareBuff
 
                     // 服务器自己刚下发的 buff：客户端回声不算新增，不重播
                     if (_supplied.TryGetValue(idx, out HashSet<int> supplied) && supplied.Remove(b))
+                    {
+                        DebugLog($"{plr.Name} 的 {BuffName(b)}({b}) 是服务器回声，跳过");
                         continue;
+                    }
 
                     OnBuffGained(plr, b);
                 }
@@ -208,6 +238,7 @@ namespace ShareBuff
             foreach (TSPlayer plr in players)
             {
                 HashSet<int> cur = CurrentBuffs(plr);
+                int missing = 0;
                 foreach (int buffId in active)
                 {
                     if (cur.Contains(buffId))
@@ -217,7 +248,11 @@ namespace ShareBuff
                     SetTimer(plr.Index, buffId, ticks);
                     GetSupplied(plr.Index).Add(buffId);
                     plr.SetBuff(buffId, ticks, true);
+                    missing++;
                 }
+
+                if (missing > 0)
+                    DebugLog($"镜像补发：{plr.Name} 缺 {missing} 项");
             }
         }
 
@@ -256,6 +291,9 @@ namespace ShareBuff
                     GetSupplied(target.Index).Add(kv.Key);
                 target.SetBuff(kv.Key, ticks, true);
             }
+
+            if (remain.Count > 0)
+                DebugLog($"进服补发给 {target.Name}：{remain.Count} 项");
         }
 
         #endregion
@@ -270,7 +308,10 @@ namespace ShareBuff
             // 防回环：被广播的玩家会带着同样 buff 上报 50 包
             if (_cooldown.TryGetValue(buffId, out long last) &&
                 _tick - last < (long)_config.cooldownSeconds * 60)
+            {
+                DebugLog($"拦截 {BuffName(buffId)}({buffId})：{src.Name} 触发时处于冷却中");
                 return;
+            }
             _cooldown[buffId] = _tick;
 
             // 服务器已经下发过（gbuff / 其他插件 / 上一轮广播）就沿用它的时长，不拿估算值覆盖
@@ -278,6 +319,16 @@ namespace ShareBuff
             if (ticks <= 0)
                 ticks = DurationOf(buffId);
 
+            // 红药水窗口内：其表内的 buff 多数也能由其他药水 / 来源获得（普通世界是 11 个减益、
+            // FTW 世界是 18 个可由药水获得的增益），时长一律以红药水实际给予的为准
+            if (InRedPotionWindow(src.Index))
+            {
+                int rp = BuffClock.RedPotionTicks(buffId);
+                if (rp > 0)
+                    ticks = rp;
+            }
+
+            DebugLog($"广播 {BuffName(buffId)}({buffId}) {ticks / 60}s，由 {src.Name} 触发");
             Apply(src, buffId, ticks, _config.takeOverSource);
         }
 
@@ -329,31 +380,57 @@ namespace ShareBuff
             inv.TryGetValue(slot, out (short type, short stack) old);
             inv[slot] = ((short)e.Type, (short)e.Stack);
 
+            DebugLog($"槽位更新 {e.Player.Name} slot={slot} old=({old.type},{old.stack}) new=({e.Type},{e.Stack})");
+
             // 只认“该槽位原有物品少了 1 个”
             if (old.type <= 0 || e.Stack >= old.stack || old.stack - e.Stack != 1)
                 return;
             if (e.Type != 0 && e.Type != old.type)
                 return;
 
+            // 红药水：客户端特判一次加一组 buff（普通世界 11 个减益 / FTW 世界 18 选 3 随机增益），
+            // 物品表查不到时长，只登记标记；后续 ScanBuffs diff 出的新 buff 时长由红药水窗口判定
+            if (old.type == ItemID.RedPotion)
+            {
+                _redPotionAt[e.Player.Index] = _tick;
+                DebugLog($"{e.Player.Name} 使用红药水，开启 {RedPotionWindow / 60}s 判定窗口");
+                return;
+            }
+
             (int buffType, int buffTime) = BuffClock.GetItemBuff(old.type);
             if (buffType <= 0 || !CanShare(buffType))
+            {
+                DebugLog($"{e.Player.Name} 消耗 {old.type} 无共享 buff（type={buffType}）");
                 return;
-
-            // 协议区分不了“喝药”和“丢弃了 1 个”：校验玩家确实持有该 buff，
-            // 排除“丢弃且从未喝过”的误判；持有时的误判代价只是多刷一轮时长
-            if (!HasBuff(e.Player, buffType))
-                return;
+            }
 
             int ticks = buffTime > 0 ? buffTime : DurationOf(buffType);
 
-            // 客户端已自行刷新，服务器只需同步自己的计时
+            // 源头持有「炼金强化」(366)（tile 699 炼金台互动获得）时喝经典药水，
+            // 客户端实际给的是 buffTime ×1.2（延长集 1-18、104-117、121-124、257、343）；
+            // 服务端发 55 包走 fromNetPvP 不再二次修正，这里按客户端实际给终值
+            if (BuffClock.IsExtendedByPotionStation(buffType) && HasBuff(e.Player, BuffID.DeadCellsPotionStation))
+            {
+                int scaled = BuffClock.ScaleByPotionStation(ticks);
+                DebugLog($"{e.Player.Name} 持炼金强化(366)，{BuffName(buffType)}({buffType}) 时长 {ticks / 60}s ×1.2 = {scaled / 60}s");
+                ticks = scaled;
+            }
+
+            // 服务器计时先同步（不凭 HasBuff 过滤：首次喝药时槽位 5 包先于 buff 50 包处理，
+            // 服务器端 buffType 还没加上该 buff，拿 HasBuff 当“丢弃 vs 喝药”闸门会误判为丢弃，
+            // 导致该 buff 精确时长被吞、退化成 DurationOf 的最大值兜底——棉花糖 60s→1500s 就是这么来的）
             SetTimer(e.Player.Index, buffType, ticks);
 
-            DebugLog($"{e.Player.Name} 使用物品 {old.type}，刷新 {BuffName(buffType)}({buffType}) {ticks / 60}s");
+            bool holds = HasBuff(e.Player, buffType);
+            DebugLog($"{e.Player.Name} 消耗物品 {old.type}，{BuffName(buffType)}({buffType}) {ticks / 60}s（已持有={holds}）");
 
-            // 重复喝药 = 重新触发一轮共享：其他玩家的该 buff 时长也重算（无回环——
-            // 已持有者 buffType 不变不会上报；已过期的被重新加上，仅多一轮收敛广播）
-            Apply(e.Player, buffType, ticks, false);
+            if (holds)
+            {
+                // 重复喝药：客户端已自行刷新，直接按精确时长重新广播一轮，其他玩家随之重算
+                // （丢弃误判的代价只是多刷一轮，与旧逻辑一致）
+                Apply(e.Player, buffType, ticks, false);
+            }
+            // 非持有 = 首次喝药：等 50 包回声，由 OnBuffGained 用刚同步的 GetTimer 精确时长广播
         }
 
         void OnServerLeave(LeaveEventArgs args)
@@ -362,6 +439,7 @@ namespace ShareBuff
             _snapshots.Remove(args.Who);
             _inv.Remove(args.Who);
             _supplied.Remove(args.Who);
+            _redPotionAt.Remove(args.Who);
         }
 
         void OnReload(ReloadEventArgs args)
@@ -372,7 +450,7 @@ namespace ShareBuff
 
         void Reload()
         {
-            _config = Config.Load(Path.Combine(SaveDir, "config.json"));
+            _config = Config.Load(ConfigPath);
             _gainSet = [.. _config.gain];
             _debuffSet = [.. _config.debuff];
 
@@ -427,6 +505,10 @@ namespace ShareBuff
                 case "config":
                     ConfigCmd(args);
                     break;
+                case "blacklist":
+                case "bl":
+                    BlacklistCmd(args);
+                    break;
                 case "docs":
                     GenerateReference(p);
                     break;
@@ -439,6 +521,7 @@ namespace ShareBuff
                     p.SendInfoMessage("  clear      - 清除所有在线玩家的 buff");
                     p.SendInfoMessage("  clearplayer- 清除指定玩家的 buff，可简写 cp");
                     p.SendInfoMessage("  config     - 查看 / 修改配置项，改动验证通过后写回文件");
+                    p.SendInfoMessage("  blacklist  - 查看 / 增删黑名单中的 buff，可简写 bl");
                     p.SendInfoMessage("  docs       - 在配置目录生成 buff 时长参考文档（.md）");
                     break;
             }
@@ -627,24 +710,30 @@ namespace ShareBuff
 
         /// <summary>
         /// /sbuff config：无参列出可配置项及当前值；/sbuff config <key> <value> 修改并验证，
-        /// 通过后更新内存并写回 config.json（列表类 gain/debuff/blacklist 请直接编辑文件后 reload）
+        /// 通过后更新内存并写回 config.json（列表类 gain/debuff/exclude 请直接编辑文件后 reload；
+        /// blacklist 可用 /sbuff blacklist 在线增删）
         /// </summary>
         void ConfigCmd(CommandArgs args)
         {
             TSPlayer p = args.Player;
             if (args.Parameters.Count < 3)
             {
-                p.SendInfoMessage("用法：/sbuff config <key> <value>（验证通过后写回文件，无参查看当前值）");
-                p.SendInfoMessage($"  enabled = {_config.enabled}（true/false）");
-                p.SendInfoMessage($"  mode = {_config.mode}（trigger/mirror）");
-                p.SendInfoMessage($"  takeOverSource = {_config.takeOverSource}（true/false）");
-                p.SendInfoMessage($"  gainDefaultSeconds = {_config.gainDefaultSeconds}（1~86400）");
-                p.SendInfoMessage($"  debuffDefaultSeconds = {_config.debuffDefaultSeconds}（1~86400）");
-                p.SendInfoMessage($"  cooldownSeconds = {_config.cooldownSeconds}（0~3600）");
-                p.SendInfoMessage($"  shareDebuff = {_config.shareDebuff}（true/false）");
-                p.SendInfoMessage($"  detectPotionUse = {_config.detectPotionUse}（true/false）");
-                p.SendInfoMessage($"  giveOnJoin = {_config.giveOnJoin}（true/false，仅 trigger 模式）");
-                p.SendInfoMessage($"  debug = {_config.debug}（true/false，决策日志）");
+                List<string> lines =
+                [
+                    "用法：/sbuff config <key> <value>（验证通过后写回文件，无参查看当前值）",
+                    $"  enabled = {_config.enabled}（true/false）",
+                    $"  mode = {_config.mode}（trigger/mirror）",
+                    $"  takeOverSource = {_config.takeOverSource}（true/false）",
+                    $"  gainDefaultSeconds = {_config.gainDefaultSeconds}（1~86400）",
+                    $"  debuffDefaultSeconds = {_config.debuffDefaultSeconds}（1~86400）",
+                    $"  cooldownSeconds = {_config.cooldownSeconds}（0~3600）",
+                    $"  shareDebuff = {_config.shareDebuff}（true/false）",
+                    $"  detectPotionUse = {_config.detectPotionUse}（true/false）",
+                    $"  giveOnJoin = {_config.giveOnJoin}（true/false，仅 trigger 模式）",
+                    $"  debug = {_config.debug}（true/false，决策日志）",
+                    $"  blacklist 管理请使用 /sbuff blacklist 指令",
+                ];
+                p.SendInfoMessage(string.Join("\n", lines));
                 return;
             }
 
@@ -673,6 +762,128 @@ namespace ShareBuff
                 p.SendInfoMessage(val.Equals("mirror", StringComparison.OrdinalIgnoreCase)
                     ? "已切换到镜像模式：全服 buff 将持续对齐到并集"
                     : "已切换到触发式：各自独立倒计时");
+        }
+
+        /// <summary>
+        /// /sbuff blacklist（简写 bl）：查看黑名单（带 buff 名称与 id），或 add / del 单个 buff id。
+        /// 增删后立即写回 config.json；CanShare 实时读取 blacklist，改完即刻生效（已在管的 buff 不受影响）。
+        /// </summary>
+        void BlacklistCmd(CommandArgs args)
+        {
+            TSPlayer p = args.Player;
+            string act = args.Parameters.Count > 1 ? args.Parameters[1].ToLower() : "list";
+
+            switch (act)
+            {
+                case "list":
+                case "l":
+                    {
+                        if (_config.blacklist.Count == 0)
+                        {
+                            p.SendInfoMessage("blacklist 黑名单为空");
+                            return;
+                        }
+
+                        var lines = _config.blacklist
+                            .OrderBy(x => x)
+                            .Select(id => $"{BuffName(id)}({id})")
+                            .ToList();
+
+                        if (!PaginationTools.TryParsePageNumber(args.Parameters, 2, p, out int pageNumber))
+                            return;
+
+                        PaginationTools.SendPage(p, pageNumber, lines, new PaginationTools.Settings
+                        {
+                            HeaderFormat = $"[c/96FF0A:/sbuff blacklist]（共 {lines.Count} 条）({{0}}/{{1}})：",
+                            FooterFormat = "输入[c/96FF0A:/sbuff blacklist list {{0}}]查看更多".SFormat(Commands.Specifier),
+                            MaxLinesPerPage = 15,
+                        });
+                        return;
+                    }
+                case "add":
+                case "a":
+                    {
+                        if (!TryParseBuffId(args, false, out int id))
+                            return;
+                        if (_config.blacklist.Contains(id))
+                        {
+                            p.SendInfoMessage($"blacklist 已包含 {BuffName(id)}({id})，未改动");
+                            return;
+                        }
+
+                        _config.blacklist.Add(id);
+                        _config.blacklist.Sort();
+                        SaveConfig(p, $"已加入黑名单：{BuffName(id)}({id})");
+                        if (BuffCats.Excluded.Contains(id))
+                            p.SendInfoMessage($"提示：{BuffName(id)}({id}) 属于宠物 / 坐骑 / 矿车，代码层已硬排除，无需拉黑");
+                        return;
+                    }
+                case "del":
+                case "delete":
+                case "remove":
+                case "rm":
+                case "d":
+                    {
+                        if (!TryParseBuffId(args, true, out int id))
+                            return;
+                        if (!_config.blacklist.Remove(id))
+                        {
+                            p.SendInfoMessage($"blacklist 里没有 {BuffName(id)}({id})，未改动");
+                            return;
+                        }
+
+                        SaveConfig(p, $"已移出黑名单：{BuffName(id)}({id})");
+                        return;
+                    }
+                default:
+                    p.SendInfoMessage("用法：/sbuff blacklist [list [页码] | add <id> | del <id>]（可简写 /sbuff bl）");
+                    p.SendInfoMessage("  list - 查看黑名单（带 buff 名称与 id）");
+                    p.SendInfoMessage("  add  - 加入单个 buff id（1~" + (BuffID.Count - 1) + "）");
+                    p.SendInfoMessage("  del  - 移出单个 buff id");
+                    return;
+            }
+        }
+
+        /// <summary>
+        /// 解析第 3 个参数为黑名单 buff id。allowLoose 时只要求正整数（旧配置里的越界 id 也要能删掉），
+        /// 否则必须是 1~BuffID.Count-1 的已知 buff id；失败时已回发错误。
+        /// </summary>
+        bool TryParseBuffId(CommandArgs args, bool allowLoose, out int id)
+        {
+            id = 0;
+            TSPlayer p = args.Player;
+            if (args.Parameters.Count < 3)
+            {
+                p.SendErrorMessage("缺少 buff id");
+                return false;
+            }
+
+            if (!int.TryParse(args.Parameters[2], out id) || id <= 0 || (!allowLoose && id >= BuffID.Count))
+            {
+                p.SendErrorMessage(allowLoose
+                    ? "buff id 需要正整数"
+                    : $"buff id 需要 1~{BuffID.Count - 1} 的整数");
+                return false;
+            }
+            return true;
+        }
+
+        /// <summary>把当前配置写回 config.json；失败时内存值已更新（重启后丢失）</summary>
+        void SaveConfig(TSPlayer p, string okMsg)
+        {
+            try
+            {
+                File.WriteAllText(ConfigPath, JsonConvert.SerializeObject(_config, Formatting.Indented));
+            }
+            catch (Exception ex)
+            {
+                TShock.Log.Error($"[ShareBuff] 写入配置文件失败：{ex}");
+                p.SendErrorMessage("写入配置文件失败，详见服务器日志（内存值已更新，重启后丢失）");
+                return;
+            }
+
+            DebugLog($"{okMsg}（by {p.Name}）");
+            p.SendSuccessMessage(okMsg + "，已写入配置文件");
         }
 
         static string ConfigPath => Path.Combine(SaveDir, "config.json");
@@ -726,7 +937,7 @@ namespace ShareBuff
                     _config.cooldownSeconds = cs;
                     return true;
                 default:
-                    err = $"未知配置项：{key}（gain/debuff/blacklist/exclude 等列表请编辑配置文件后 /sbuff reload）";
+                    err = $"未知配置项：{key}（gain/debuff/exclude 等列表请编辑配置文件后 /sbuff reload；blacklist 用 /sbuff blacklist）";
                     return false;
             }
         }
@@ -805,6 +1016,12 @@ namespace ShareBuff
                     var notes = new List<string>();
                     if (_config.blacklist.Contains(id))
                         notes.Add("在 blacklist 黑名单");
+                    if (BuffClock.RedPotionTicks(id) > 0)
+                        notes.Add($"红药水可赋予 {FmtTicks(BuffClock.RedPotionTicks(id))}");
+                    if (BuffClock.IsExtendedByPotionStation(id))
+                        notes.Add($"持炼金强化(366)时实际 {FmtTicks(BuffClock.ScaleByPotionStation(DurationOf(id)))}");
+                    if (id == BuffID.DeadCellsPotionStation)
+                        notes.Add("点 tile 699（炼金台）互动获得 1800s，无物品来源");
                     if (_cfgBuffSeconds.TryGetValue(id, out int cfgSec))
                         notes.Add($"配置覆盖 {cfgSec}s");
                     switch (cat)
@@ -844,6 +1061,9 @@ namespace ShareBuff
                 sb.AppendLine("说明：");
                 sb.AppendLine("- **时长**为服务器实际采用的时长，优先级：buffs 表配置秒数 > 物品自带时长 > 分类兜底（gainDefaultSeconds / debuffDefaultSeconds）。");
                 sb.AppendLine("- **物品**列列出该 buff 的物品来源（id + 名称），同一 buff 多个来源用 `<br>` 分隔；`(持续)` 表示装备/手持类每帧续命，不按此计时。");
+                sb.AppendLine("- 红药水（678）走客户端特判，不在物品来源列；其表内 buff 在共享时按红药水实际时长计（含难度放大），见备注列。");
+                sb.AppendLine("- 源头持有「炼金强化」(366)（点 tile 699 炼金台互动获得 1800s）时喝经典药水，客户端实际时长是物品时长 ×1.2");
+                sb.AppendLine("  （1-18、104-117、121-124、257、343），共享按源头实际最终时长计，见备注列。");
                 sb.AppendLine("- 宠物 / 坐骑 / 矿车被 BuffCats 硬排除，不参与共享，仅作参考列出。");
 
                 // 按类别分表输出
@@ -954,6 +1174,12 @@ namespace ShareBuff
                 _supplied[plr] = set;
             }
             return set;
+        }
+
+        /// <summary>该玩家是否处于红药水判定窗口内（刚喝下红药水）</summary>
+        bool InRedPotionWindow(int plr)
+        {
+            return _redPotionAt.TryGetValue(plr, out long at) && _tick - at <= RedPotionWindow;
         }
 
         int GetTimer(int plr, int buffId)
