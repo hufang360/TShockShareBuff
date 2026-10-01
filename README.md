@@ -2,6 +2,8 @@
 
 Buff 全服共享，任意在线玩家获得 buff 时，自动下发给全服其他在线玩家。
 
+> **下载**：[ShareBuff-v0.4.0-0911.dll](https://github.com/hufang360/TShockShareBuff/releases/download/v0.4.0/ShareBuff-v0.4.0-0911.dll) · [全部版本](https://github.com/hufang360/TShockShareBuff/releases)
+
 ## 特性
 
 - **两种共享模式**：触发式 `trigger`（各自独立倒计时）/ 镜像式 `mirror`（全服持续对齐并集）
@@ -15,7 +17,7 @@ Buff 全服共享，任意在线玩家获得 buff 时，自动下发给全服其
 
 ## 安装
 
-1. 把 `ShareBuff.dll` 放进 TShock 的 `ServerPlugins/` 目录
+1. 从 [Releases](https://github.com/hufang360/TShockShareBuff/releases/latest) 下载 `ShareBuff.dll`，放进 TShock 的 `ServerPlugins/` 目录
 2. 重启服务器，或 `/tshock reload` 热加载
 3. 首次启动自动生成配置 `tshock/ShareBuff/config.json`——白名单已预填全部增益 / 减益，**开箱即用**
 
