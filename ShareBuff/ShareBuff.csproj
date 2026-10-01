@@ -43,8 +43,8 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- <PackageReference Include="TShock" Version="6.1.0" /> -->
-    <Reference
+    <PackageReference Include="TShock" Version="6.2.1" />
+    <!-- <Reference
       Include="OTAPI">
       <HintPath>../../lib/1458/OTAPI.dll</HintPath>
     </Reference>
@@ -56,7 +56,7 @@
       Include="TShockAPI">
       <HintPath>../../lib/1458/TShockAPI.dll</HintPath>
     </Reference>
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" /> -->
   </ItemGroup>
 
 </Project>
